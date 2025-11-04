@@ -66,20 +66,13 @@ async def send_message(
     db.add(user_message)
     db.commit()
     
-    # TODO: Process message with ChatEngine
-    # chat_engine = ChatEngine(db)
-    # result = await chat_engine.process_message(
-    #     conversation_id=conversation.id,
-    #     message=request.message,
-    #     document_id=request.document_id
-    # )
-    
-    # For now, return placeholder response
-    result = {
-        "answer": "This is a placeholder response. Implement ChatEngine to process messages.",
-        "sources": [],
-        "processing_time": 0.0
-    }
+    # Process message with ChatEngine
+    chat_engine = ChatEngine(db)
+    result = await chat_engine.process_message(
+        conversation_id=conversation.id,
+        message=request.message,
+        document_id=request.document_id
+    )
     
     # Save assistant message
     assistant_message = Message(

@@ -3,6 +3,7 @@ Document management API endpoints
 """
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 from typing import List
 from app.db.session import get_db
 from app.models.document import Document
@@ -10,9 +11,41 @@ from app.services.document_processor import DocumentProcessor
 from app.core.config import settings
 import os
 import uuid
-from datetime import datetime
+from logging import getLogger
 
+logger = getLogger(__name__)
 router = APIRouter()
+
+
+async def _process_document_task(document_id: int, file_path: str):
+    """Background task to process the uploaded document"""
+    # Get a new database session not tied to request lifecycle
+    db = get_db().__next__()
+
+    # Fetch document record, if not found log error and return
+    statement = select(Document).filter(Document.id == document_id)
+    document = db.execute(statement).scalars().first()
+    if not document:
+        logger.error(f"Document with ID {document_id} not found for processing")
+        return
+
+    try:
+        processor = DocumentProcessor(file_path)
+        result = await processor.process_document(file_path, document_id)
+
+        # Update document record in DB
+        document.filename = os.path.basename(file_path)
+        document.file_path = file_path
+        document.processing_status = "completed"
+        document.text_chunks_count = result["text_chunks"]
+        document.images_count = result["images"]
+        document.tables_count = result["tables"]
+        document.processing_time = result["processing_time"]
+        db.commit()
+    except Exception as e:
+        document.processing_status = "failed"
+        document.error_message = str(e)
+        db.commit()
 
 
 @router.post("/upload")
@@ -36,8 +69,11 @@ async def upload_document(
     # Validate file size
     contents = await file.read()
     if len(contents) > settings.MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail=f"File size exceeds {settings.MAX_FILE_SIZE / 1024 / 1024}MB limit")
-    
+        raise HTTPException(
+            status_code=400,
+            detail=f"File size exceeds {settings.MAX_FILE_SIZE / 1024 / 1024}MB limit"
+        )
+
     # Generate unique filename
     file_id = str(uuid.uuid4())
     file_extension = os.path.splitext(file.filename)[1]
@@ -58,9 +94,8 @@ async def upload_document(
     db.commit()
     db.refresh(document)
     
-    # TODO: Trigger background processing
-    # background_tasks.add_task(process_document_task, document.id, file_path, db)
-    # For now, you can process synchronously or implement Celery
+    # Trigger background processing
+    background_tasks.add_task(_process_document_task, document.id, file_path)
     
     return {
         "id": document.id,
