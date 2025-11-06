@@ -1,35 +1,60 @@
 """
 Chat engine service for multimodal RAG.
 
-TODO: Implement this service to:
+Implements:
 1. Process user messages
 2. Search for relevant context using vector store
 3. Find related images and tables
 4. Generate responses using LLM
 5. Support multi-turn conversations
 """
+import logging
+import time
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from app.models.conversation import Conversation, Message
-from app.services.vector_store import VectorStore
+from sqlalchemy import asc, select
+
 from app.core.config import settings
-import time
+from app.models.conversation import Message
+from app.services.vector_store import VectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatEngine:
     """
-    Multimodal chat engine with RAG.
+    Multimodal chat engine with RAG (Retrieval-Augmented Generation).
     
-    This is a SKELETON implementation. You need to implement the core logic.
+    Supports:
+    - Multi-turn conversations with history
+    - Vector-based similarity search for context retrieval
+    - Multimodal responses with images and tables
+    - LLM integration (OpenAI or fallback)
     """
     
-    def __init__(self, db: Session):
-        self.db = db
-        self.vector_store = VectorStore(db)
-        self.llm = None  # TODO: Initialize LLM (OpenAI, Ollama, etc.)
+    def __init__(self):
+        self.vector_store = VectorStore()
+        self.llm_client = None
+        self._initialize_llm()
+    
+    def _initialize_llm(self):
+        """
+        Initialize LLM client (OpenAI or fallback).
+        """
+        if settings.OPENAI_API_KEY:
+            try:
+                from openai import OpenAI
+                self.llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                logger.info("LLM initialized with OpenAI")
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI LLM: {e}")
+        else:
+            logger.warning("OpenAI API key not provided. LLM responses will be limited.")
     
     async def process_message(
         self,
+        session: Session,
         conversation_id: int,
         message: str,
         document_id: Optional[int] = None
@@ -44,6 +69,7 @@ class ChatEngine:
         4. Build prompt with context and history
         5. Generate response using LLM
         6. Format response with sources (text, images, tables)
+        7. Save user message and assistant response to database
         
         Args:
             conversation_id: Conversation ID
@@ -77,55 +103,84 @@ class ChatEngine:
                 "processing_time": 2.5
             }
         """
-        # TODO: Implement message processing
-        # 
-        # Example LLM usage with OpenAI:
-        # from openai import OpenAI
-        # client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        # 
-        # response = client.chat.completions.create(
-        #     model=settings.OPENAI_MODEL,
-        #     messages=[
-        #         {"role": "system", "content": system_prompt},
-        #         {"role": "user", "content": user_prompt}
-        #     ]
-        # )
-        # 
-        # Example with LangChain:
-        # from langchain_openai import ChatOpenAI
-        # from langchain.prompts import ChatPromptTemplate
-        # 
-        # llm = ChatOpenAI(model=settings.OPENAI_MODEL)
-        # prompt = ChatPromptTemplate.from_messages([...])
-        # chain = prompt | llm
-        # response = chain.invoke({...})
-        
-        raise NotImplementedError("Message processing not implemented yet")
+        start_time = time.time()
+
+        # Step 1: Load conversation history
+        history = await self._load_conversation_history(session, conversation_id)
+
+        # Step 2: Search for relevant context
+        context = await self._search_context(
+            session,
+            message,
+            document_id,
+            k=settings.TOP_K_RESULTS,
+        )
+
+        # Step 3: Find related images and tables
+        media = await self._find_related_media(session, context)
+
+        # Step 4 & 5: Generate response using LLM
+        answer = await self._generate_response(message, context, history, media)
+
+        # Step 6: Format sources for response
+        sources = self._format_sources(context, media)
+
+        # Step 7: Save messages to database
+        self._save_messages(session, conversation_id, message, answer, sources)
+
+        processing_time = time.time() - start_time
+
+        return {
+            "answer": answer,
+            "sources": sources,
+            "processing_time": round(processing_time, 2)
+        }
     
     async def _load_conversation_history(
         self,
+        session: Session,
         conversation_id: int,
         limit: int = 5
     ) -> List[Dict[str, str]]:
         """
         Load recent conversation history.
         
-        TODO: Implement conversation history loading
-        - Load last N messages from conversation
-        - Format for LLM context
-        - Include both user and assistant messages
+        Loads the last N messages from the conversation and formats them for LLM context.
+        Includes both user and assistant messages in chronological order.
         
+        Args:
+            conversation_id: Conversation ID
+            limit: Maximum number of messages to load (default 5)
+            
         Returns:
+            List of message dictionaries:
             [
                 {"role": "user", "content": "..."},
                 {"role": "assistant", "content": "..."},
                 ...
             ]
         """
-        raise NotImplementedError("History loading not implemented yet")
-    
+        # Query recent messages from the conversation chronologically
+        # Oldest first
+        statement = select(Message).filter(
+            Message.conversation_id == conversation_id
+        ).order_by(
+            asc(Message.created_at)
+        ).limit(limit)
+        messages = session.execute(statement).scalars().all()
+
+        # Format for LLM
+        history = [
+            {"role": msg.role, "content": msg.content}
+            for msg in messages
+        ]
+
+        logger.info(f"Loaded {len(history)} messages from conversation {conversation_id}")
+        return history
+
     async def _search_context(
         self,
+        session: Session,
         query: str,
         document_id: Optional[int] = None,
         k: int = 5
@@ -133,45 +188,105 @@ class ChatEngine:
         """
         Search for relevant context using vector store.
         
-        TODO: Implement context search
-        - Use vector store similarity search
-        - Filter by document if specified
-        - Return relevant chunks with metadata
+        Uses vector similarity search to find the most relevant text chunks
+        from the document(s). Filters by document_id if specified.
+        
+        Args:
+            query: Search query text
+            document_id: Optional document ID to filter search
+            k: Number of results to return (default 5)
+            
+        Returns:
+            List of relevant chunks with metadata:
+            [
+                {
+                    "id": 123,
+                    "content": "...",
+                    "page_number": 3,
+                    "score": 0.95,
+                    "metadata": {...}
+                },
+                ...
+            ]
         """
-        raise NotImplementedError("Context search not implemented yet")
+        context = await self.vector_store.similarity_search(
+            session,
+            query=query,
+            document_id=document_id,
+            k=k
+        )
+
+        logger.info(f"Found {len(context)} relevant chunks for query")
+        return context
     
     async def _find_related_media(
         self,
-        context_chunks: List[Dict[str, Any]]
+        session: Session,
+        context: List[Dict[str, Any]]
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Find related images and tables from context chunks.
         
-        TODO: Implement related media finding
-        - Extract image/table references from chunk metadata
-        - Query database for actual image/table records
-        - Return with URLs for frontend display
+        Extracts image and table references from chunk metadata and retrieves
+        the actual media records from the database. Includes URLs and metadata
+        for frontend display.
         
+        Args:
+            context_chunks: List of context chunks with metadata
+            
         Returns:
+            Dictionary with images and tables:
             {
                 "images": [
                     {
                         "url": "/uploads/images/xxx.png",
                         "caption": "...",
-                        "page": 3
+                        "page_number": 3
                     }
                 ],
                 "tables": [
                     {
                         "url": "/uploads/tables/yyy.png",
                         "caption": "...",
-                        "page": 5,
+                        "page_number": 5,
                         "data": {...}
                     }
                 ]
             }
         """
-        raise NotImplementedError("Related media finding not implemented yet")
+        try:
+            if not context:
+                return {"images": [], "tables": []}
+
+            chunk_ids = [chunk["id"] for chunk in context]
+            media = await self.vector_store.get_related_content(session, chunk_ids)
+            
+            # Convert file paths to URLs
+            media_with_urls = {
+                "images": [
+                    {
+                        "url": f"/uploads/images/{img['file_path'].split('/')[-1]}",
+                        "caption": img.get("caption"),
+                        "page_number": img.get("page_number")
+                    }
+                    for img in media.get("images", [])
+                ],
+                "tables": [
+                    {
+                        "url": f"/uploads/tables/{tbl['image_path'].split('/')[-1]}",
+                        "caption": tbl.get("caption"),
+                        "page_number": tbl.get("page_number"),
+                        "data": tbl.get("data")
+                    }
+                    for tbl in media.get("tables", [])
+                ]
+            }
+            
+            return media_with_urls
+        
+        except Exception as e:
+            logger.error(f"Error finding related media: {e}")
+            return {"images": [], "tables": []}
     
     async def _generate_response(
         self,
@@ -183,23 +298,159 @@ class ChatEngine:
         """
         Generate response using LLM.
         
-        TODO: Implement LLM response generation
-        - Build comprehensive prompt with:
-          - System instructions
-          - Conversation history
-          - Retrieved context
-          - Available images/tables
-        - Call LLM API
-        - Return generated answer
+        Builds a comprehensive prompt with:
+        - System instructions for multimodal responses
+        - Conversation history for context
+        - Retrieved context from vector search
+        - Available images and tables
         
-        Prompt engineering tips:
-        - Instruct LLM to reference images/tables when relevant
-        - Include context from previous messages
-        - Ask LLM to cite sources
-        - Format for good UX (bullet points, etc.)
+        Then calls the LLM API to generate a response.
+        
+        Args:
+            message: Current user message
+            context: Retrieved context chunks
+            history: Conversation history
+            media: Related images and tables
+            
+        Returns:
+            Generated response text
         """
-        raise NotImplementedError("Response generation not implemented yet")
+        try:
+            # Build system prompt with multimodal instructions
+            system_prompt = self._build_system_prompt(media)
+            
+            # Build context string from retrieved chunks
+            context_str = self._build_context_string(context)
+            
+            # Build user prompt with history and current message
+            user_prompt = self._build_user_prompt(message, context_str, media)
+            
+            # If no LLM client, return a helpful message
+            if not self.llm_client:
+                return f"The LLM client is not configured. However, I found relevant information in the document about your question. Context: {context_str[:500]}..."
+            
+            # Call LLM API
+            response = self.llm_client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    *history,
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.5,  # Be creative but accurate
+                max_tokens=500    # Allow detailed responses up to 500 tokens
+            )
+
+            answer = response.choices[0].message.content
+            logger.info("Response generated successfully")
+            return answer
+
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return f"I encountered an error generating a response: {str(e)}"
+
+    def _build_system_prompt(self, media: Dict[str, List[Dict[str, Any]]]) -> str:
+        """
+        Build system prompt for multimodal responses.
+        
+        Instructs the LLM to:
+        - Reference images and tables when available
+        - Cite sources
+        - Format for good UX
+        """
+        prompt = """You are a helpful assistant answering questions about documents.
+
+Instructions:
+1. Answer questions based on the provided context from the document
+2. Be accurate and cite specific information from the context
+3. If images or tables are available, reference them in your answer
+4. Format your response clearly with sections if needed
+5. If you don't know the answer based on the context, say so clearly
+6. Keep responses concise but informative"""
+        
+        if media.get("images"):
+            prompt += f"\n7. Available images: {len(media['images'])} image(s) are available to reference"
+        
+        if media.get("tables"):
+            prompt += f"\n8. Available tables: {len(media['tables'])} table(s) are available to reference"
+        
+        return prompt
     
+    def _build_context_string(self, context: List[Dict[str, Any]]) -> str:
+        """Build a formatted string from context chunks for the prompt."""
+        if not context:
+            return "No relevant context found."
+        
+        context_parts = ["## Document Context:\n"]
+        for i, chunk in enumerate(context[:3], 1):  # Use top 3 chunks
+            page = chunk.get("page_number", "unknown")
+            score = chunk.get("score", 0.0)
+            content = chunk.get("content", "")
+            context_parts.append(f"[Chunk {i} - Page {page} - Score: {score:.2f}]\n{content}\n")
+        
+        return "\n".join(context_parts)
+    
+    def _build_user_prompt(
+        self,
+        message: str,
+        context: str,
+        media: Dict[str, List[Dict[str, Any]]]
+    ) -> str:
+        """Build user prompt with context and media information."""
+        prompt = f"{context}\n\n## User Question:\n{message}"
+        
+        if media.get("images"):
+            prompt += f"\n\n## Available Images:\n"
+            for img in media["images"]:
+                caption = img.get("caption", "No caption")
+                page = img.get("page_number", "unknown")
+                prompt += f"- Image on page {page}: {caption}\n"
+        
+        if media.get("tables"):
+            prompt += f"\n## Available Tables:\n"
+            for tbl in media["tables"]:
+                caption = tbl.get("caption", "No caption")
+                page = tbl.get("page_number", "unknown")
+                prompt += f"- Table on page {page}: {caption}\n"
+        
+        return prompt
+    
+    def _save_messages(
+        self,
+        session: Session,
+        conversation_id: int,
+        user_message: str,
+        assistant_response: str,
+        sources: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Save user and assistant messages to database.
+        
+        Args:
+            conversation_id: Conversation ID
+            user_message: User's message
+            assistant_response: Assistant's response
+            sources: Sources used in the response
+        """
+        # Save user message
+        user_msg = Message(
+            conversation_id=conversation_id,
+            role="user",
+            content=user_message,
+            sources=None
+        )
+        session.add(user_msg)
+        
+        # Save assistant message with sources
+        assistant_msg = Message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=assistant_response,
+            sources=sources
+        )
+        session.add(assistant_msg)
+        logger.info(f"Saved messages to conversation {conversation_id}")
+
     def _format_sources(
         self,
         context: List[Dict[str, Any]],
@@ -208,15 +459,23 @@ class ChatEngine:
         """
         Format sources for response.
         
-        This is implemented as an example.
+        Combines text chunks, images, and tables into a unified source list
+        for the frontend to display.
+        
+        Args:
+            context: Retrieved context chunks
+            media: Related images and tables
+            
+        Returns:
+            List of formatted sources
         """
         sources = []
         
-        # Add text sources
-        for chunk in context[:3]:  # Top 3 text chunks
+        # Add text sources (top 3)
+        for chunk in context[:3]:
             sources.append({
                 "type": "text",
-                "content": chunk["content"],
+                "content": chunk.get("content", "")[:200],  # Truncate for display
                 "page": chunk.get("page_number"),
                 "score": chunk.get("score", 0.0)
             })
@@ -225,18 +484,18 @@ class ChatEngine:
         for image in media.get("images", []):
             sources.append({
                 "type": "image",
-                "url": image["url"],
+                "url": image.get("url"),
                 "caption": image.get("caption"),
-                "page": image.get("page")
+                "page": image.get("page_number")
             })
         
         # Add table sources
         for table in media.get("tables", []):
             sources.append({
                 "type": "table",
-                "url": table["url"],
+                "url": table.get("url"),
                 "caption": table.get("caption"),
-                "page": table.get("page"),
+                "page": table.get("page_number"),
                 "data": table.get("data")
             })
         

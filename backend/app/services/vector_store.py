@@ -7,13 +7,17 @@ Implements:
 3. Perform similarity search with cosine similarity
 4. Link related images and tables
 """
-from typing import List, Dict, Any, Optional, Tuple
+import logging
 import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
+
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from app.models.document import DocumentChunk, DocumentImage, DocumentTable
+
 from app.core.config import settings
-import logging
+from app.db.session import scoped_session
+from app.models.document import DocumentChunk, DocumentImage, DocumentTable
+
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +31,7 @@ class VectorStore:
     - Sentence Transformers (local fallback)
     """
     
-    def __init__(self, db: Session):
-        self.db = db
+    def __init__(self):
         self.embeddings_model = None
         self.use_openai = False
         self._initialize_embeddings_model()
@@ -62,20 +65,17 @@ class VectorStore:
         except Exception as e:
             logger.error(f"Failed to initialize sentence-transformers: {e}")
             raise RuntimeError("Could not initialize any embedding model")
-    
+
     def _ensure_extension(self):
         """
         Ensure pgvector extension is enabled in PostgreSQL.
         
         Creates the vector extension if it doesn't exist.
         """
-        try:
-            self.db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            self.db.commit()
+        with scoped_session() as session:
+            session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            session.commit()
             logger.info("pgvector extension enabled")
-        except Exception as e:
-            logger.warning(f"pgvector extension already exists or error: {e}")
-            self.db.rollback()
     
     async def generate_embedding(self, text: str) -> np.ndarray:
         """
@@ -108,7 +108,8 @@ class VectorStore:
             raise RuntimeError(f"Failed to generate embedding: {e}")
     
     async def store_chunk(
-        self, 
+        self,
+        session: Session,
         content: str, 
         document_id: int,
         page_number: int,
@@ -127,39 +128,30 @@ class VectorStore:
             
         Returns:
             Created DocumentChunk record
-            
-        Raises:
-            RuntimeError: If embedding generation or database storage fails
         """
-        try:
-            # Generate embedding for the content
-            embedding = await self.generate_embedding(content)
-            
-            # Create DocumentChunk record
-            chunk = DocumentChunk(
-                document_id=document_id,
-                content=content,
-                embedding=embedding.tolist(),  # pgvector accepts list
-                page_number=page_number,
-                chunk_index=chunk_index,
-                metadata=metadata or {}
-            )
-            
-            # Store in database
-            self.db.add(chunk)
-            self.db.commit()
-            self.db.refresh(chunk)
-            
-            logger.info(f"Stored chunk {chunk_index} for document {document_id}")
-            return chunk
-            
-        except Exception as e:
-            self.db.rollback()
-            logger.error(f"Error storing chunk: {e}")
-            raise RuntimeError(f"Failed to store chunk: {e}")
+        # Generate embedding for the content
+        embedding = await self.generate_embedding(content)
+        
+        # Create DocumentChunk record
+        chunk = DocumentChunk(
+            document_id=document_id,
+            content=content,
+            embedding=embedding.tolist(),  # pgvector accepts list
+            page_number=page_number,
+            chunk_index=chunk_index,
+            metadata=metadata or {}
+        )
+        
+        # Store in database
+        session.add(chunk)
+        session.flush()  # To get ID assigned
+
+        logger.info(f"Stored chunk {chunk_index} for document {document_id}")
+        return chunk
     
     async def similarity_search(
         self,
+        session: Session,
         query: str,
         document_id: Optional[int] = None,
         k: int = 5
@@ -207,66 +199,62 @@ class VectorStore:
         Raises:
             RuntimeError: If embedding generation or search fails
         """
-        try:
-            # Generate embedding for query
-            query_embedding = await self.generate_embedding(query)
-            
-            # Build SQL query with pgvector similarity search
-            sql_query = """
-                SELECT 
-                    dc.id,
-                    dc.content,
-                    dc.page_number,
-                    dc.chunk_index,
-                    dc.metadata,
-                    dc.document_id,
-                    1 - (dc.embedding <=> :query_embedding::vector) as similarity_score
-                FROM document_chunks dc
-            """
-            
-            # Add document filter if specified
-            if document_id:
-                sql_query += " WHERE dc.document_id = :document_id"
-            
-            # Order by similarity and limit
-            sql_query += """
-                ORDER BY dc.embedding <=> :query_embedding::vector
-                LIMIT :k
-            """
-            
-            # Execute query
-            params = {
-                "query_embedding": query_embedding.tolist(),
-                "k": k
-            }
-            if document_id:
-                params["document_id"] = document_id
-            
-            result = self.db.execute(text(sql_query), params)
-            rows = result.fetchall()
-            
-            # Format results
-            results = []
-            for row in rows:
-                results.append({
-                    "id": row[0],
-                    "content": row[1],
-                    "page_number": row[2],
-                    "chunk_index": row[3],
-                    "metadata": row[4] or {},
-                    "document_id": row[5],
-                    "score": float(row[6]) if row[6] else 0.0
-                })
-            
-            logger.info(f"Found {len(results)} similar chunks for query")
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error in similarity search: {e}")
-            raise RuntimeError(f"Failed to perform similarity search: {e}")
-    
+        # Generate embedding for query
+        query_embedding = await self.generate_embedding(query)
+        
+        # Build SQL query with pgvector similarity search
+        sql_query = """
+            SELECT 
+                dc.id,
+                dc.content,
+                dc.page_number,
+                dc.chunk_index,
+                dc.metadata,
+                dc.document_id,
+                1 - (dc.embedding <=> :query_embedding::vector) as similarity_score
+            FROM document_chunks dc
+        """
+        
+        # Add document filter if specified
+        if document_id:
+            sql_query += " WHERE dc.document_id = :document_id"
+        
+        # Order by similarity and limit
+        sql_query += """
+            ORDER BY dc.embedding <=> :query_embedding::vector
+            LIMIT :k
+        """
+        
+        # Execute query
+        params = {
+            "query_embedding": query_embedding.tolist(),
+            "k": k
+        }
+        if document_id:
+            params["document_id"] = document_id
+        
+        result = session.execute(text(sql_query), params)
+        rows = result.fetchall()
+        
+        # Format results
+        results = []
+        for row in rows:
+            results.append({
+                "id": row[0],
+                "content": row[1],
+                "page_number": row[2],
+                "chunk_index": row[3],
+                "metadata": row[4] or {},
+                "document_id": row[5],
+                "score": float(row[6]) if row[6] else 0.0
+            })
+        
+        logger.info(f"Found {len(results)} similar chunks for query")
+        return results
+
     async def get_related_content(
         self,
+        session: Session,
         chunk_ids: List[int]
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -310,30 +298,25 @@ class VectorStore:
         Raises:
             RuntimeError: If database query fails
         """
-        try:
-            # Extract related image and table IDs from chunks
-            related_image_ids, related_table_ids = self._extract_related_media_ids_from_chunks(self.db, chunk_ids)
+        # Extract related image and table IDs from chunks
+        related_image_ids, related_table_ids = self._extract_related_media_ids_from_chunks(session, chunk_ids)
 
-            # Retrieve related images
-            images = []
-            if related_image_ids:
-                images = self._get_document_images(self.db, list(related_image_ids))
+        # Retrieve related images
+        images = []
+        if related_image_ids:
+            images = self._get_document_images(session, list(related_image_ids))
 
-            # Retrieve related tables
-            tables = []
-            if related_table_ids:
-                tables = self._get_document_tables(self.db, list(related_table_ids))
+        # Retrieve related tables
+        tables = []
+        if related_table_ids:
+            tables = self._get_document_tables(session, list(related_table_ids))
 
-            logger.info(f"Retrieved {len(images)} images and {len(tables)} tables for {len(chunk_ids)} chunks")
+        logger.info(f"Retrieved {len(images)} images and {len(tables)} tables for {len(chunk_ids)} chunks")
 
-            return {
-                "images": images,
-                "tables": tables
-            }
-            
-        except Exception as e:
-            logger.error(f"Error retrieving related content: {e}")
-            raise RuntimeError(f"Failed to retrieve related content: {e}")
+        return {
+            "images": images,
+            "tables": tables
+        }
     
     def _extract_related_media_ids_from_chunks(self, session: Session, chunk_ids: List[int]) -> Tuple[set, set]:
         """

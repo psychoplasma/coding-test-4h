@@ -1,9 +1,12 @@
 """
 Database session management
 """
+import contextlib
+from typing import Generator
+
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from app.core.config import settings
 
 engine = create_engine(
@@ -24,3 +27,19 @@ def get_db():
         yield db
     finally:
         db.close()
+
+@contextlib.contextmanager
+def scoped_session() -> Generator[Session]:
+    """Provide a session scope around a series of operations.
+
+    Usage:
+    ```python
+    with session_scope() as session:
+        session.get(...)
+        session.add(...)
+        # Commit will be called automatically if the block is exited without errors
+        # Rollback will be called if an error occurs
+    ```
+    """
+    with SessionLocal.begin() as session:
+        yield session
