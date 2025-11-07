@@ -20,12 +20,18 @@ dependencies = [
     "sqlalchemy>=2.0.44",
     "testcontainers>=4.13.2",
     "uvicorn[standard]>=0.38.0",
+    "langchain>=1.0.4",
+    "sentence-transformers>=5.1.2",
+    "langchain-openai>=1.0.2",
+    "langchain-community>=0.4.1",
+    "langchain-google-vertexai>=3.0.2",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
+    "testcontainers>=4.13.2",
 ]
 
 # [build-system]

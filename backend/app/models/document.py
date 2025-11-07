@@ -3,7 +3,7 @@ Document-related database models
 """
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from sqlalchemy.sql import func
 from app.db.session import Base
 from pgvector.sqlalchemy import Vector
 
@@ -14,7 +14,7 @@ class Document(Base):
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String, nullable=False)
     file_path = Column(String, nullable=False)
-    upload_date = Column(DateTime, default=datetime.utcnow)
+    upload_date = Column(DateTime, default=func.now())
     processing_status = Column(String, default="pending")  # pending, processing, completed, error
     error_message = Column(Text, nullable=True)
     total_pages = Column(Integer, default=0)
@@ -37,8 +37,8 @@ class DocumentChunk(Base):
     embedding = Column(Vector(1536))  # OpenAI embedding dimension
     page_number = Column(Integer)
     chunk_index = Column(Integer)
-    metadata = Column(JSON)  # {related_images: [...], related_tables: [...], ...}
-    created_at = Column(DateTime, default=datetime.utcnow)
+    chunk_metadata = Column(JSON)  # {related_images: [...], related_tables: [...], ...}
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
     document = relationship("Document", back_populates="chunks")
@@ -54,8 +54,8 @@ class DocumentImage(Base):
     caption = Column(Text, nullable=True)
     width = Column(Integer)
     height = Column(Integer)
-    metadata = Column(JSON)  # Additional metadata from Docling
-    created_at = Column(DateTime, default=datetime.utcnow)
+    image_metadata = Column(JSON)  # Additional metadata from Docling
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
     document = relationship("Document", back_populates="images")
@@ -72,8 +72,8 @@ class DocumentTable(Base):
     caption = Column(Text, nullable=True)
     rows = Column(Integer)
     columns = Column(Integer)
-    metadata = Column(JSON)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    table_metadata = Column(JSON)
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
     document = relationship("Document", back_populates="tables")

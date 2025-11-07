@@ -3,7 +3,7 @@ Conversation and message models for chat functionality
 """
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Text
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from sqlalchemy.sql import func
 from app.db.session import Base
 
 
@@ -12,8 +12,8 @@ class Conversation(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
     
     # Relationships
@@ -28,7 +28,7 @@ class Message(Base):
     role = Column(String, nullable=False)  # 'user' or 'assistant'
     content = Column(Text, nullable=False)
     sources = Column(JSON, nullable=True)  # Sources used for answer (text, images, tables)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=func.now())
     
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")

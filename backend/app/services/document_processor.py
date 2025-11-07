@@ -12,12 +12,12 @@ from io import BytesIO
 import logging
 import os
 from pathlib import Path
-import re
 import time
 from typing import Dict, Any, List, Literal, Tuple
 
 from docling.document_converter import DocumentConverter
 from PIL import Image, ImageDraw, ImageFont
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlalchemy.orm import Session
 
 from app.db.session import scoped_session
@@ -561,7 +561,7 @@ class DocumentProcessor:
         Split text into chunks for vector storage.
         
         Implementation:
-        - Split by sentences, then by size with overlap
+        - Split by paragraphs and sentences, then by size with overlap
         - Maintain context with overlap
         - Keep metadata (page number, position, etc.)
         
@@ -579,90 +579,30 @@ class DocumentProcessor:
             - related_tables: table IDs (added by caller)
         """
         chunks = []
-        
+
         if not text or not text.strip():
             return chunks
-        
-        chunk_size = settings.CHUNK_SIZE
-        overlap = settings.CHUNK_OVERLAP
-        
-        # Simple chunking strategy: split by sentences, then by size with overlap
-        sentences = self._split_into_sentences(text)
-        
-        current_chunk = ""
-        current_chunk_start = 0
-        
-        for i, sentence in enumerate(sentences):
-            # Add sentence to current chunk
-            if current_chunk:
-                test_chunk = current_chunk + " " + sentence
-            else:
-                test_chunk = sentence
-            
-            # Check if adding this sentence would exceed chunk size
-            if len(test_chunk) > chunk_size and current_chunk:
-                # Save current chunk
-                chunks.append({
-                    "content": current_chunk.strip(),
-                    "page_number": page_number,
-                    "start_pos": current_chunk_start,
-                    "related_images": [],
-                    "related_tables": []
-                })
-                
-                # Start new chunk with overlap
-                # Include last few sentences for context
-                overlap_text = " ".join(sentences[max(0, i-2):i])
-                current_chunk = overlap_text + " " + sentence
-                current_chunk_start = len(text) - len(test_chunk)
-            else:
-                current_chunk = test_chunk
-        
-        # Add final chunk
-        if current_chunk.strip():
+
+        # Try to split text by paragraphs, sentences, words in that order if possible
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+        )
+        splits = text_splitter.split_text(text)
+
+        for split in splits:
+            start_pos = text.find(split)
             chunks.append({
-                "content": current_chunk.strip(),
+                "content": split,
                 "page_number": page_number,
-                "start_pos": current_chunk_start,
+                "start_pos": start_pos,
                 "related_images": [],
-                "related_tables": []
+                "related_tables": [],
             })
-        
+
         logger.debug(f"Created {len(chunks)} chunks from page {page_number}")
         return chunks
-    
-    def _split_into_sentences(self, text: str) -> List[str]:
-        """
-        Split text into sentences for better chunking.
-        
-        Simple heuristic-based splitting:
-        - Split on '. ', '! ', '? '
-        - Preserve sentence boundaries for context
-        
-        Args:
-            text: Text to split
-            
-        Returns:
-            List of sentences
-        """
-        # Split on sentence boundaries but keep delimiters
-        sentences = re.split(r'([.!?])\s+', text)
-        
-        # Reconstruct sentences with delimiters
-        result = []
-        i = 0
-        while i < len(sentences):
-            if i + 1 < len(sentences) and sentences[i + 1] in '.!?':
-                # Combine text with its delimiter
-                result.append(sentences[i] + sentences[i + 1])
-                i += 2
-            elif sentences[i].strip():
-                result.append(sentences[i])
-                i += 1
-            else:
-                i += 1
-        
-        return [s.strip() for s in result if s.strip()]
 
     async def _save_text_chunks(
         self,

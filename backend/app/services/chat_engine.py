@@ -11,8 +11,14 @@ Implements:
 import logging
 import time
 from typing import Dict, Any, List, Optional
+
 from sqlalchemy.orm import Session
 from sqlalchemy import asc, select
+from langchain.chat_models.base import _ConfigurableModel
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_google_vertexai import ChatVertexAI
+from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
 from app.models.conversation import Message
@@ -35,29 +41,47 @@ class ChatEngine:
     
     def __init__(self):
         self.vector_store = VectorStore()
-        self.llm_client = None
+        self.llm_client = BaseChatModel | _ConfigurableModel
         self._initialize_llm()
     
     def _initialize_llm(self):
         """
-        Initialize LLM client (OpenAI or fallback).
+        Initialize LLM client using LangChain.
+        
+        Supports:
+        - OpenAI models via ChatOpenAI
+        - Other LLM providers can be added by modifying provider selection logic
         """
-        if settings.OPENAI_API_KEY:
-            try:
-                from openai import OpenAI
-                self.llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
-                logger.info("LLM initialized with OpenAI")
-            except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI LLM: {e}")
-        else:
-            logger.warning("OpenAI API key not provided. LLM responses will be limited.")
+        try:
+            if settings.OPENAI_API_KEY:
+                self.llm_client = ChatOpenAI(
+                    name=settings.OPENAI_MODEL,
+                    temperature=0.5,
+                    api_key=settings.OPENAI_API_KEY,
+                    max_completion_tokens=500,
+                    streaming=False,
+                )
+                logger.info(f"LLM initialized with OpenAI")
+            elif settings.USE_GEMINI:
+                self.llm_client = ChatVertexAI(
+                    model_name=settings.GEMINI_MODEL,
+                    temperature=0.5,
+                    max_output_tokens=500,
+                    streaming=False,
+                )
+                logger.info(f"LLM initialized with Gemini")
+            else:
+                raise ValueError("Either OpenAI API key or Gemini usage flag must be set.")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM: {e}")
+            raise RuntimeError("LLM initialization failed.") from e
     
     async def process_message(
         self,
         session: Session,
         conversation_id: int,
         message: str,
-        document_id: Optional[int] = None
+        document_ids: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """
         Process a chat message and generate multimodal response.
@@ -112,7 +136,7 @@ class ChatEngine:
         context = await self._search_context(
             session,
             message,
-            document_id,
+            document_ids,
             k=settings.TOP_K_RESULTS,
         )
 
@@ -182,7 +206,7 @@ class ChatEngine:
         self,
         session: Session,
         query: str,
-        document_id: Optional[int] = None,
+        document_ids: Optional[List[int]] = None,
         k: int = 5
     ) -> List[Dict[str, Any]]:
         """
@@ -212,7 +236,7 @@ class ChatEngine:
         context = await self.vector_store.similarity_search(
             session,
             query=query,
-            document_id=document_id,
+            document_ids=document_ids,
             k=k
         )
 
@@ -316,38 +340,43 @@ class ChatEngine:
             Generated response text
         """
         try:
-            # Build system prompt with multimodal instructions
-            system_prompt = self._build_system_prompt(media)
-            
-            # Build context string from retrieved chunks
-            context_str = self._build_context_string(context)
-            
-            # Build user prompt with history and current message
-            user_prompt = self._build_user_prompt(message, context_str, media)
-            
-            # If no LLM client, return a helpful message
-            if not self.llm_client:
-                return f"The LLM client is not configured. However, I found relevant information in the document about your question. Context: {context_str[:500]}..."
-            
-            # Call LLM API
-            response = self.llm_client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    *history,
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.5,  # Be creative but accurate
-                max_tokens=500    # Allow detailed responses up to 500 tokens
-            )
-
-            answer = response.choices[0].message.content
-            logger.info("Response generated successfully")
-            return answer
-
+            messages = self._aggregate_messages(message, context, history, media)
+            response = self.llm_client.invoke(messages)
+            return response.content if response else "I'm sorry, I couldn't generate a response."
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             return f"I encountered an error generating a response: {str(e)}"
+
+    def _aggregate_messages(
+        self,
+        message: str,
+        context: List[Dict[str, Any]],
+        history: List[Dict[str, str]],
+        media: Dict[str, List[Dict[str, Any]]]
+    ) -> List[BaseMessage]:
+        """Aggregate messages for LLM input."""
+        # Build system prompt with multimodal instructions
+        system_prompt = self._build_system_prompt(media)
+
+        # Build context string from retrieved chunks
+        context_str = self._build_context_string(context)
+
+        # Build user prompt with history and current message
+        user_prompt = self._build_user_prompt(message, context_str, media)
+
+        # Convert history to LangChain message format
+        messages = [SystemMessage(content=system_prompt)]
+
+        for hist_msg in history:
+            if hist_msg["role"] == "user":
+                messages.append(HumanMessage(content=hist_msg["content"]))
+            elif hist_msg["role"] == "assistant":
+                messages.append(AIMessage(content=hist_msg["content"]))
+
+        # Add current user message
+        messages.append(HumanMessage(content=user_prompt))
+
+        return messages
 
     def _build_system_prompt(self, media: Dict[str, List[Dict[str, Any]]]) -> str:
         """

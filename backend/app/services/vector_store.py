@@ -2,7 +2,7 @@
 Vector store service using pgvector.
 
 Implements:
-1. Generate embeddings for text chunks using OpenAI or sentence-transformers
+1. Generate embeddings for text chunks using LangChain (OpenAI or sentence-transformers)
 2. Store embeddings in PostgreSQL with pgvector
 3. Perform similarity search with cosine similarity
 4. Link related images and tables
@@ -13,6 +13,9 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_google_vertexai import VertexAIEmbeddings
 
 from app.core.config import settings
 from app.db.session import scoped_session
@@ -33,37 +36,58 @@ class VectorStore:
     
     def __init__(self):
         self.embeddings_model = None
-        self.use_openai = False
         self._initialize_embeddings_model()
         self._ensure_extension()
     
     def _initialize_embeddings_model(self):
         """
-        Initialize embeddings model - OpenAI or local sentence-transformers.
+        Initialize embeddings model using LangChain.
+        
+        Supports:
+        - OpenAI embeddings via OpenAIEmbeddings (if OPENAI_API_KEY is provided)
+        - Gemini embeddings via VertexAIEmbeddings (if GEMINI_API_KEY is provided)
+        - HuggingFace embeddings as local fallback
         """
         if settings.OPENAI_API_KEY:
             try:
-                from openai import OpenAI
-                self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
-                self.use_openai = True
-                logger.info("Using OpenAI embeddings")
+                self.embeddings_model = OpenAIEmbeddings(
+                    model=settings.OPENAI_EMBEDDING_MODEL,
+                    api_key=settings.OPENAI_API_KEY,
+                    dimensions=settings.EMBEDDING_DIMENSION,
+                )
+                logger.info(f"Using OpenAI embeddings (model: {settings.OPENAI_EMBEDDING_MODEL})")
             except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI client: {e}. Falling back to sentence-transformers")
+                logger.warning(f"Failed to initialize OpenAI embeddings: {e}. Falling back to HuggingFace embeddings")
+                self._init_sentence_transformers()
+        elif settings.USE_GEMINI:
+            try:
+                # Dimension is 768 by default, if needed, can be adjusted when calling embed(dimension=),
+                # instead of embed_query which does not pass dimension parameter down to embed() method.
+                # Just skipping dimension setting for the sake of simplicity
+                self.embeddings_model = VertexAIEmbeddings(
+                    model=settings.GEMINI_EMBEDDING_MODEL,
+                    api_key=settings.GEMINI_API_KEY,
+                )
+                logger.info(f"Using Gemini embeddings (model: {settings.GEMINI_EMBEDDING_MODEL})")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Gemini embeddings: {e}. Falling back to HuggingFace embeddings")
                 self._init_sentence_transformers()
         else:
             self._init_sentence_transformers()
     
     def _init_sentence_transformers(self):
         """
-        Initialize sentence-transformers as fallback embedding model.
+        Initialize HuggingFace embeddings (sentence-transformers) as fallback.
+
+        Uses the all-MiniLM-L6-v2 model with 384 dimensions for local embeddings.
         """
         try:
-            from sentence_transformers import SentenceTransformer
-            self.embeddings_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self.use_openai = False
-            logger.info("Using sentence-transformers embeddings")
+            self.embeddings_model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+            )
+            logger.info("Using HuggingFace embeddings (model: all-MiniLM-L6-v2)")
         except Exception as e:
-            logger.error(f"Failed to initialize sentence-transformers: {e}")
+            logger.error(f"Failed to initialize HuggingFace embeddings: {e}")
             raise RuntimeError("Could not initialize any embedding model")
 
     def _ensure_extension(self):
@@ -81,28 +105,20 @@ class VectorStore:
         """
         Generate embedding for text.
         
-        Uses OpenAI API if configured, otherwise falls back to sentence-transformers.
+        Uses OpenAI API if configured, otherwise falls back to HuggingFace embeddings.
         
         Args:
             text: Text to embed
             
         Returns:
-            numpy array of embeddings (1536-dimensional for OpenAI, 384 for sentence-transformers)
+            numpy array of embeddings (1536-dimensional for OpenAI, 384 for HuggingFace)
         """
         if not text or not isinstance(text, str):
             raise ValueError("Text must be a non-empty string")
         
         try:
-            if self.use_openai:
-                response = self.openai_client.embeddings.create(
-                    model=settings.OPENAI_EMBEDDING_MODEL,
-                    input=text
-                )
-                return np.array(response.data[0].embedding)
-            else:
-                # Using sentence-transformers
-                embedding = self.embeddings_model.encode(text)
-                return np.array(embedding)
+            embedding = self.embeddings_model.embed_query(text)
+            return np.array(embedding)
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
             raise RuntimeError(f"Failed to generate embedding: {e}")
@@ -139,7 +155,7 @@ class VectorStore:
             embedding=embedding.tolist(),  # pgvector accepts list
             page_number=page_number,
             chunk_index=chunk_index,
-            metadata=metadata or {}
+            chunk_metadata=metadata or {}
         )
         
         # Store in database
@@ -153,7 +169,7 @@ class VectorStore:
         self,
         session: Session,
         query: str,
-        document_id: Optional[int] = None,
+        document_ids: Optional[List[int]] = None,
         k: int = 5
     ) -> List[Dict[str, Any]]:
         """
@@ -216,8 +232,8 @@ class VectorStore:
         """
         
         # Add document filter if specified
-        if document_id:
-            sql_query += " WHERE dc.document_id = :document_id"
+        if document_ids is not None and len(document_ids) > 0:
+            sql_query += " WHERE dc.document_id IN :document_ids"
         
         # Order by similarity and limit
         sql_query += """
@@ -230,11 +246,10 @@ class VectorStore:
             "query_embedding": query_embedding.tolist(),
             "k": k
         }
-        if document_id:
-            params["document_id"] = document_id
+        if document_ids is not None and len(document_ids) > 0:
+            params["document_ids"] = document_ids
         
-        result = session.execute(text(sql_query), params)
-        rows = result.fetchall()
+        rows = session.execute(text(sql_query), params).all()
         
         # Format results
         results = []
@@ -339,9 +354,9 @@ class VectorStore:
             related_table_ids = set()
 
             for chunk in chunks:
-                if chunk.metadata:
-                    related_images = chunk.metadata.get("related_images", [])
-                    related_tables = chunk.metadata.get("related_tables", [])
+                if chunk.chunk_metadata:
+                    related_images = chunk.chunk_metadata.get("related_images", [])
+                    related_tables = chunk.chunk_metadata.get("related_tables", [])
                     
                     if isinstance(related_images, list):
                         related_image_ids.update(related_images)
@@ -376,7 +391,7 @@ class VectorStore:
                     "caption": img.caption,
                     "width": img.width,
                     "height": img.height,
-                    "metadata": img.metadata or {}
+                    "metadata": img.image_metadata or {}
                 }
                 for img in images
             ]
@@ -408,7 +423,7 @@ class VectorStore:
                     "rows": tbl.rows,
                     "columns": tbl.columns,
                     "data": tbl.data or {},
-                    "metadata": tbl.metadata or {}
+                    "metadata": tbl.table_metadata or {}
                 }
                 for tbl in tables
             ]

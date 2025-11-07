@@ -62,7 +62,7 @@ class ChatService():
                     session=session,
                     conversation_id=conversation.id,
                     message=request.message,
-                    document_id=request.document_id
+                    document_ids=request.document_ids
                 )
             except Exception as e:
                 result = {

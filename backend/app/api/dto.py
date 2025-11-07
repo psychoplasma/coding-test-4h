@@ -8,7 +8,7 @@ class ChatRequest(BaseModel):
     """Request model for sending a chat message"""
     message: str = Field(..., description="The user's message to the chat service")
     conversation_id: Optional[int] = Field(None, description="ID of the existing conversation")
-    document_id: Optional[int] = Field(None, description="ID of the document being referenced")
+    document_ids: Optional[List[int]] = Field(None, description="IDs of the documents being referenced")
 
 class ChatResponse(BaseModel):
     """Response model for chat message"""
