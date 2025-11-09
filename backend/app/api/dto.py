@@ -3,6 +3,7 @@ import os
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
+from app.models.conversation import Conversation, Message
 from app.models.document import Document
 
 
@@ -29,7 +30,7 @@ class MessageResponse(BaseModel):
     created_at: str = Field(..., description="Creation timestamp of the message")
 
     @staticmethod
-    def from_model(message) -> "MessageResponse":
+    def from_model(message: Message) -> "MessageResponse":
         return MessageResponse(
             id=message.id,
             role=message.role,
@@ -43,16 +44,16 @@ class ConversationResponse(BaseModel):
     id: int = Field(..., description="ID of the conversation")
     title: str = Field(..., description="Title of the conversation")
     created_at: str = Field(..., description="Creation timestamp of the conversation")
-    document_id: Optional[int] = Field(None, description="ID of the associated document")
+    document_ids: List[int] = Field(..., description="IDs of the associated documents")
     messages: List[dict] = Field(..., description="List of messages in the conversation")
 
     @staticmethod
-    def from_model(conversation) -> "ConversationResponse":
+    def from_model(conversation: Conversation) -> "ConversationResponse":
         return ConversationResponse(
             id=conversation.id,
             title=conversation.title,
             created_at=conversation.created_at.isoformat(),
-            document_id=conversation.document_id,
+            document_ids= [doc.id for doc in conversation.documents],
             messages=[MessageResponse.from_model(message) for message in conversation.messages]
         )
 

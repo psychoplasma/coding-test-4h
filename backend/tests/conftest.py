@@ -202,7 +202,7 @@ def mock_vector_store() -> AsyncMock:
 
     # Mock generate_embedding
     mock_store.generate_embedding = AsyncMock(
-        return_value=[0.1] * 1536  # Simulate 1536-dimensional embedding
+        return_value=[0.1] * 348  # Simulate 348-dimensional embedding
     )
 
     return mock_store
@@ -358,6 +358,7 @@ def sample_images(db_session: Session, sample_document):
     
     for img in images:
         db_session.add(img)
+        img.document = sample_document
     db_session.commit()
     
     for img in images:
@@ -393,6 +394,7 @@ def sample_tables(db_session: Session, sample_document):
     
     for table in tables:
         db_session.add(table)
+        table.document = sample_document
     db_session.commit()
     
     for table in tables:
@@ -444,6 +446,15 @@ def auto_mock_vector_store_and_settings():
         yield
 
 @pytest.fixture
+def create_document_processor(mock_vector_store):
+    from app.services.document_processor import DocumentProcessor
+
+    processor = DocumentProcessor()
+    processor.vector_store = mock_vector_store
+
+    return processor
+
+@pytest.fixture
 def chat_engine_with_mocks(mock_llm_client, mock_vector_store):
     """
     Create a ChatEngine instance with mocked dependencies.
@@ -458,3 +469,18 @@ def chat_engine_with_mocks(mock_llm_client, mock_vector_store):
     engine.vector_store = mock_vector_store
     
     return engine
+
+
+# ============================================================================
+# FastAPI Test Client Fixture
+# ============================================================================
+
+@pytest.fixture
+def client():
+    """
+    Create a test client for the FastAPI app.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    return TestClient(app)
