@@ -1,4 +1,5 @@
 
+import json
 import os
 from typing import Optional, List
 from pydantic import BaseModel, Field
@@ -35,7 +36,7 @@ class MessageResponse(BaseModel):
             id=message.id,
             role=message.role,
             content=message.content,
-            sources=message.sources,
+            sources=json.loads(message.sources) if message.sources and isinstance(message.sources, str) else [],
             created_at=message.created_at.isoformat()
         )
 
@@ -45,7 +46,7 @@ class ConversationResponse(BaseModel):
     title: str = Field(..., description="Title of the conversation")
     created_at: str = Field(..., description="Creation timestamp of the conversation")
     document_ids: List[int] = Field(..., description="IDs of the associated documents")
-    messages: List[dict] = Field(..., description="List of messages in the conversation")
+    messages: List[MessageResponse] = Field(..., description="List of messages in the conversation")
 
     @staticmethod
     def from_model(conversation: Conversation) -> "ConversationResponse":
