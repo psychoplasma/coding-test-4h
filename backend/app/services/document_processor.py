@@ -8,19 +8,20 @@ Implements PDF document processing with:
 4. Generate embeddings for text chunks
 """
 from datetime import datetime, timezone
-from io import BytesIO
 import logging
 import os
 from pathlib import Path
 import time
 from typing import Dict, Any, List, Literal, Tuple
 
-from docling.document_converter import DocumentConverter
-from PIL import Image, ImageDraw, ImageFont
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from docling_core.types.doc import PictureItem, TableItem
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.document import ConversionResult, DoclingDocument
+from docling.datamodel.pipeline_options import TableFormerMode, PdfPipelineOptions
+from PIL import Image
 from sqlalchemy.orm import Session
 
-from app.db.session import scoped_session
 from app.core.config import settings
 from app.models.document import Document, DocumentImage, DocumentTable
 from app.services.vector_store import VectorStore
@@ -50,7 +51,7 @@ class DocumentProcessor:
         for subdir in ["images", "tables"]:
             Path(os.path.join(upload_dir, subdir)).mkdir(parents=True, exist_ok=True)
     
-    async def process_document(self, file_path: str, document_id: int) -> Dict[str, Any]:
+    async def process_document(self, session: Session, file_path: str, document_id: int) -> None:
         """
         Process a PDF document using Docling.
 
@@ -81,73 +82,60 @@ class DocumentProcessor:
         logger.info(f"Starting to process document {document_id}")
 
         start_time = time.time()
-        all_chunks = []
-        text_chunks_count = 0
         images_count = 0
         tables_count = 0
 
-        with scoped_session() as session:
-            # Get document record
-            document = self._get_document_by_id(session, document_id)
+        # Get document record
+        document = self._get_document_by_id(session, document_id)
 
-            # Update status to processing
-            document.processing_status = "processing"
-            session.commit()
+        # Update status to processing
+        document.processing_status = "processing"
+        session.flush()
 
-            # Parse PDF with Docling
-            docling_result = self._parse_pdf_file(file_path)
+        # Parse PDF with Docling
+        docling_result = self._parse_pdf_file(file_path)
 
-            # Extract and save images first
-            images_count, image_ids_by_page = await self._extract_and_save_image_metadata(
-                session,
-                document_id,
-                docling_result,
-            )
+        # Extract and save images first
+        images_count, image_ids_by_page = await self._extract_and_save_image_metadata(
+            session,
+            document_id,
+            docling_result,
+        )
 
-            # Extract and save tables
-            tables_count, table_ids_by_page = await self._extract_and_save_table_metadata(
-                session,
-                document_id,
-                docling_result,
-            )
+        # Extract and save tables
+        tables_count, table_ids_by_page = await self._extract_and_save_table_metadata(
+            session,
+            document_id,
+            docling_result,
+        )
 
-            # Extract and chunk texts
-            all_chunks = self._extract_text_and_create_chunks(
-                docling_result,
-                image_ids_by_page,
-                table_ids_by_page,
-            )
-            text_chunks_count = len(all_chunks)
+        # Chunk document and save embeddings to Vector Store
+        num_chunks = await self._chunk_document(
+            session,
+            document_id,
+            docling_result.document,
+            image_ids_by_page,
+            table_ids_by_page,
+        )
 
-            document.total_pages = len(docling_result.pages)
-            document.text_chunks_count = text_chunks_count
-            document.images_count = images_count
-            document.tables_count = tables_count
+        processing_time = time.time() - start_time
 
-            # Save chunks with embeddings in VectorStore
-            await self._save_text_chunks(session,all_chunks, document_id)
-
-            # Get document record
-            document = self._get_document_by_id(session, document_id)
-            # Update status to completed
-            document.processing_status = "completed"
-
-            processing_time = time.time() - start_time
-            logger.info(
-                f"Document {document_id} processed successfully. "
-                f"Chunks: {text_chunks_count}, Images: {images_count}, Tables: {tables_count}, "
-                f"Time: {processing_time:.2f}s"
-            )
-
-            return {
-                "status": "success",
-                "text_chunks": text_chunks_count,
-                "images": images_count,
-                "tables": tables_count,
-                "processing_time": processing_time
-            }
+        document.total_pages = len(docling_result.pages)
+        document.text_chunks_count = num_chunks
+        document.images_count = images_count
+        document.tables_count = tables_count
+        # Update status to completed
+        document.processing_status = "completed"
+        document.processing_time = processing_time
+        session.flush()
+        
+        logger.info(
+            f"Document {document_id} processed successfully. "
+            f"Chunks: {num_chunks}, Images: {images_count}, Tables: {tables_count}, "
+            f"Time: {processing_time:.2f}s"
+        )
     
-    def _parse_pdf_file(self, file_path: str) -> Any:
+    def _parse_pdf_file(self, file_path: str) -> ConversionResult:
         """
         Parse PDF using Docling and return the document object.
         
@@ -156,7 +144,19 @@ class DocumentProcessor:
         """
         logger.info(f"Parsing PDF: {file_path}")
 
-        converter = DocumentConverter()
+        pipeline_options = PdfPipelineOptions(do_table_structure=True)
+        pipeline_options.table_structure_options.do_cell_matching = False
+        pipeline_options.do_formula_enrichment = True
+        pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+        pipeline_options.images_scale = 2.0
+        pipeline_options.generate_page_images = True
+        pipeline_options.generate_picture_images = True
+
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            },
+        )
         docling_result = converter.convert(file_path)
 
         logger.info(f"PDF parsed successfully. Pages: {len(docling_result.pages)}")
@@ -167,7 +167,7 @@ class DocumentProcessor:
         self,
         session: Session,
         document_id: int,
-        docling_result: Any,
+        docling_result: ConversionResult,
     ) -> Tuple[int, Dict[int, List[int]]]:
         """
         Extract metadata from an image object.
@@ -185,25 +185,27 @@ class DocumentProcessor:
 
         # Extract images
         logger.info("Extracting images...")
-        for page_num, page_view in enumerate(docling_result.pages, 1):
-            image_ids_by_page[page_num] = []
+        for element, _ in docling_result.document.iterate_items():
+            if isinstance(element, PictureItem):
+                images_count += 1
+                image = element.get_image(docling_result.document)
+                caption = element.caption_text(docling_result.document)
+                page_num = element.prov[0].page_no  # Use the first page this image appears on
 
-            # Extract images from page
-            if hasattr(page_view, 'images'):
-                for image in page_view.images:
-                    img_record = await self._save_image(
-                        session=session,
-                        image_data=image.to_bytes() if hasattr(image, 'to_bytes') else image.image,
-                        document_id=document_id,
-                        page_number=page_num,
-                        metadata={
-                            "caption": image.caption if hasattr(image, 'caption') else None,
-                            "source": "docling_extraction"
-                        }
-                    )
-                    image_ids_by_page[page_num].append(img_record.id)
-                    images_count += 1
-                    logger.debug(f"Saved image on page {page_num}: {img_record.id}")
+                img_record = await self._save_image(
+                    session=session,
+                    image=image,
+                    document_id=document_id,
+                    page_number=page_num,
+                    metadata={
+                        "caption": caption,
+                        "source": "docling_extraction" #TODO: use file source
+                    }
+                )
+                if image_ids_by_page.get(page_num) is None:
+                    image_ids_by_page[page_num] = []
+                image_ids_by_page[page_num].append(img_record.id)
+                logger.info(f"Saved image on page {page_num}: {img_record.id}")
 
         logger.info(f"Extracted {images_count} images from document {document_id}")
         return images_count, image_ids_by_page
@@ -211,35 +213,29 @@ class DocumentProcessor:
     async def _save_image(
         self,
         session: Session,
-        image_data: bytes, 
+        image: Image.Image, 
         document_id: int, 
         page_number: int,
         metadata: Dict[str, Any]
     ) -> DocumentImage:
         """
         Save an extracted image to disk and database.
-        
-        Implementation:
+
         - Save image file to disk in UPLOAD_DIR/images/
         - Create DocumentImage record
         - Extract caption if available
-        
+
         Args:
-            image_data: Image bytes
+            session: Scoped database session
+            image: PIL Image object
             document_id: Document ID
             page_number: Page number
             metadata: Image metadata (caption, source, etc.)
-            
+
         Returns:
             DocumentImage database record
-            
-        Raises:
-            RuntimeError: If image saving fails
         """
-        image_path = self._generate_unique_filepath("table", document_id, page_number)
-        
-        # Convert image_data to PIL Image
-        width, height = self._convert_image_to_png_and_save(image_path, image_data)
+        image_path = self._save_to_disk("image", document_id, page_number, image)
 
         # Create database record
         doc_image = DocumentImage(
@@ -247,8 +243,8 @@ class DocumentProcessor:
             file_path=image_path,
             page_number=page_number,
             caption=metadata.get("caption"),
-            width=width,
-            height=height,
+            width=image.width,
+            height=image.height,
             metadata=metadata,
         )
 
@@ -257,38 +253,12 @@ class DocumentProcessor:
 
         logger.info(f"Created DocumentImage record {doc_image.id}")
         return doc_image
-    
-    def _convert_image_to_png_and_save(self, image_path: str, image_data: bytes):
-        width, height = None, None
-        try:
-            if isinstance(image_data, bytes):
-                pil_image = Image.open(BytesIO(image_data))
-            else:
-                pil_image = image_data
-            
-            # Ensure RGB mode for PNG
-            if pil_image.mode != "RGB":
-                pil_image = pil_image.convert("RGB")
-            
-            # Save image
-            pil_image.save(image_path, format="PNG")
-
-            width, height = pil_image.width, pil_image.height
-
-            logger.debug(f"Saved image to {image_path}")
-        except Exception as e:
-            logger.warning(f"Failed to process image as Pillow image, saving raw bytes instead: {e}")
-            # Save raw bytes
-            with open(image_path, 'wb') as f:
-                f.write(image_data)
-
-        return width, height
 
     async def _extract_and_save_table_metadata(
         self,
         session: Session,
         document_id: int,
-        docling_result: Any,
+        docling_result: ConversionResult,
     ) -> Tuple[int, Dict[int, List[int]]]:
         """
         Extract table metadata from the Docling result.
@@ -306,366 +276,178 @@ class DocumentProcessor:
 
         # Extract tables
         logger.info("Extracting tables...")
-        for page_num, page_view in enumerate(docling_result.pages, 1):
-            table_ids_by_page[page_num] = []
-            
-            # Extract tables from page
-            if hasattr(page_view, 'tables'):
-                for table in page_view.tables:
-                    tbl_record = await self._save_table(
-                        session=session,
-                        table_data=table,
-                        document_id=document_id,
-                        page_number=page_num,
-                        metadata={
-                            "caption": table.caption if hasattr(table, 'caption') else None,
-                            "source": "docling_extraction"
-                        }
-                    )
-                    table_ids_by_page[page_num].append(tbl_record.id)
-                    tables_count += 1
-                    logger.debug(f"Saved table on page {page_num}: {tbl_record.id}")
+        for element, _ in docling_result.document.iterate_items():
+            if isinstance(element, TableItem):
+                tables_count += 1
+                page_num = element.prov[0].page_no  # Use the first page this table appears on
+                table_image = element.get_image(docling_result.document)
+                table_caption = element.caption_text(docling_result.document)
 
-    async def _save_table(
+                tbl_record = self._save_table(
+                    session=session,
+                    table=element,
+                    table_image=table_image,
+                    document_id=document_id,
+                    page_number=page_num,
+                    metadata={
+                        "caption": table_caption,
+                        "source": "docling_extraction" #TODO: use file source
+                    }
+                )
+                if table_ids_by_page.get(page_num) is None:
+                    table_ids_by_page[page_num] = []
+                table_ids_by_page[page_num].append(tbl_record.id)
+                logger.info(f"Saved table on page {page_num}: {tbl_record.id}")
+        
+        logger.info(f"Extracted {tables_count} tables from document {document_id}")
+        return tables_count, table_ids_by_page
+
+    def _save_table(
         self,
         session: Session,
-        table_data: Any,
+        table: TableItem,
+        table_image: Image.Image,
         document_id: int,
         page_number: int,
         metadata: Dict[str, Any]
     ) -> DocumentTable:
         """
-        Save an extracted table as image and structured data.
-        
-        Implementation:
-        - Render table as image
+        Save a table as image and structured data.
+
+        - Save table image to disk
         - Store structured data as JSON
         - Create DocumentTable record
-        
+
         Args:
-            table_data: Table object from Docling
+            session: Scoped database session
+            table: Table object
+            table_image: Table image (PIL Image)
             document_id: Document ID
             page_number: Page number
             metadata: Table metadata (caption, source, etc.)
-            
+
         Returns:
             DocumentTable database record
-            
-        Raises:
-            RuntimeError: If table saving fails
         """
-        # Generate unique table filename
-        table_image_path = self._generate_unique_filepath("table", document_id, page_number)
-
-        # Extract table data
-        table_dict, rows, columns = self._extract_table_data_as_dict(table_data)
-
-        # Render table as image
-        self._render_table_as_image_and_save(table_dict, table_data, table_image_path)
-
+        # Save table image
+        image_path = self._save_to_disk("table", document_id, page_number, table_image)
         # Create database record
         doc_table = DocumentTable(
             document_id=document_id,
-            image_path=table_image_path,
+            image_path=image_path,
             page_number=page_number,
             caption=metadata.get("caption"),
-            rows=rows,
-            columns=columns,
-            data=table_dict,
+            rows=table.data.num_rows,
+            columns=table.data.num_cols,
+            data=table.data.model_dump(), # FIXME: Does this serialize table cells correctly?
             metadata=metadata
         )
 
         session.add(doc_table)
-        session.commit()
-        session.refresh(doc_table)
+        session.flush()
 
         logger.info(f"Created DocumentTable record {doc_table.id}")
         return doc_table
-    
-    def _extract_table_data_as_dict(table_data: Any) -> Tuple[Dict[str, Any], int, int]:
-        """
-        Extract table data as dictionary along with dimensions.
-        """
-        # Extract table data
-        table_dict = {}
-        rows = 0
-        columns = 0
 
-        # Try to extract structured data from table
-        if hasattr(table_data, 'to_dict'):
-            table_dict = table_data.to_dict()
-        elif hasattr(table_data, 'data'):
-            table_dict = table_data.data
-        else:
-            # Fallback: convert to string representation
-            table_dict = {"content": str(table_data)}
-
-        # Try to get dimensions
-        if isinstance(table_dict, dict):
-            if "rows" in table_dict:
-                rows = len(table_dict.get("rows", []))
-            elif "data" in table_dict:
-                rows = len(table_dict["data"])
-            
-            if "columns" in table_dict:
-                columns = len(table_dict["columns"])
-            elif rows > 0 and isinstance(table_dict.get("data", [None])[0], list):
-                columns = len(table_dict["data"][0])
-
-        return table_dict, rows, columns
-
-    def _render_table_as_image_and_save(
+    def _save_to_disk(
         self,
-        table_dict: Dict[str, Any],
-        table_data: Any,
-        table_image_path: str
-    ) -> None:
+        media_type: Literal["table", "image"],
+        document_id: int,
+        page_number: int,
+        image: Image.Image,
+    ) -> str:
         """
-        Render table as an image for display.
-        
-        Args:
-            table_dict: Table data as dictionary
-            table_data: Original table object
-            
-        Returns:
-            PIL Image with rendered table
-        """
-        try:
-            # Try to use table object's rendering if available
-            if hasattr(table_data, 'to_image'):
-                return table_data.to_image()
-        except:
-            pass
-        
-        # Fallback: create simple table visualization
-        cell_width = 150
-        cell_height = 40
-        margin = 10
-        
-        # Extract rows and columns
-        rows = []
-        if isinstance(table_dict, dict):
-            if "rows" in table_dict:
-                rows = table_dict["rows"]
-            elif "data" in table_dict:
-                rows = table_dict["data"]
-            else:
-                # Create a simple text representation
-                rows = [[str(table_dict)]]
-        
-        if not rows:
-            rows = [[str(table_dict)]]
-        
-        # Limit table size for rendering
-        rows = rows[:20]  # Max 20 rows
-        cols = max([len(row) if isinstance(row, list) else 1 for row in rows], 1)
-        cols = min(cols, 6)  # Max 6 columns
-        
-        # Calculate image size
-        width = cols * cell_width + margin * 2
-        height = len(rows) * cell_height + margin * 2
-        
-        # Create image
-        image = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(image)
-        
-        try:
-            # Try to use a better font
-            font = ImageFont.truetype("/System/Library/Fonts/Monaco.dfont", 10)
-        except:
-            # Fallback to default font
-            font = ImageFont.load_default()
-        
-        # Draw cells
-        for row_idx, row in enumerate(rows):
-            for col_idx in range(min(cols, len(row) if isinstance(row, list) else 1)):
-                x = margin + col_idx * cell_width
-                y = margin + row_idx * cell_height
-                
-                # Draw cell border
-                draw.rectangle(
-                    [x, y, x + cell_width, y + cell_height],
-                    outline='black'
-                )
-                
-                # Draw cell text
-                try:
-                    if isinstance(row, list) and col_idx < len(row):
-                        cell_text = str(row[col_idx])[:20]
-                    else:
-                        cell_text = str(row)[:20]
-                    
-                    text_x = x + 5
-                    text_y = y + 5
-                    draw.text((text_x, text_y), cell_text, fill='black', font=font)
-                except Exception as e:
-                    logger.debug(f"Failed to draw cell text: {e}")
+        Save image to disk, or create a placeholder if saving fails.
 
-        # Save table image
+        Args:
+            media_type: Type of media ("table" or "image")
+            document_id: Document ID of the image
+            page_number: Page number of the image
+            image: PIL Image object
+
+        Returns:
+            Path to the saved image file
+        """
+        # Generate unique image filename
+        image_path = self._generate_unique_filepath(media_type, document_id, page_number)
+
+        # Save image
         try:
-            image.save(table_image_path, format="PNG")
-            logger.debug(f"Rendered table image to {table_image_path}")
+            image.save(image_path, format="PNG")
+            logger.debug(f"Saved image to {image_path}")
         except Exception as e:
-            logger.warning(f"Failed to render table image: {e}. Creating a placeholder instead.")
+            logger.warning(f"Failed to save image to '{image_path}': {e}. Creating a placeholder instead.")
             # Create a minimal placeholder image
             placeholder = Image.new('RGB', (800, 600), color='white')
-            placeholder.save(table_image_path, format="PNG")
+            placeholder.save(image_path, format="PNG")
 
-    def _extract_text_and_create_chunks(
+        return image_path
+
+    async def _chunk_document(
         self,
-        docling_result: Any,
+        session: Session,
+        document_id: int,
+        document: DoclingDocument,
         image_ids_by_page: Dict[int, List[int]],
         table_ids_by_page: Dict[int, List[int]],
-    ) -> List[Dict[str, Any]]:
+    ) -> int:
         """
-        Extract and chunk text from the Docling result.
+        Chunk document text and save them in Vector Store with embeddings
 
         Args:
-            document_id: Document ID
-            docling_result: Parsed Docling document object
-            image_ids_by_page: Mapping of page numbers to image IDs
-            table_ids_by_page: Mapping of page numbers to table IDs
-
+            session: Scoped database session
+            document_id: Corresponding document ID
+            document: Parsed Docling document object
+            image_ids_by_page: Related images by page
+            table_ids_by_page: Related tables by page
         Returns:
             List of text chunk dictionaries
         """
-        logger.info("Extracting and chunking text...")
-        all_chunks = []
-        chunk_index = 0
+        from docling.chunking import HybridChunker
+        from docling_core.transforms.chunker.hierarchical_chunker import DocChunk
 
-        for page_num, page_view in enumerate(docling_result.pages, 1):
-            # Extract text from page
-            text_content = page_view.text if hasattr(page_view, 'text') else ""
-            
-            if not text_content.strip():
-                logger.debug(f"No text content on page {page_num}")
-                continue
+        chunker = HybridChunker(tokenizer=self.vector_store.tokenizer)
+        chunk_iter = list(chunker.chunk(document))
 
-            # Chunk text
-            chunks = self._chunk_text(text_content, page_num)
+        logger.info(f"Generated {len(chunk_iter)} chunks.")
 
-            # Add related media IDs to chunks
-            for chunk in chunks:
-                chunk["related_images"] = image_ids_by_page.get(page_num, [])
-                chunk["related_tables"] = table_ids_by_page.get(page_num, [])
-                chunk["chunk_index"] = chunk_index
-                chunk_index += 1
-
-            all_chunks.extend(chunks)
-            logger.debug(f"Chunked page {page_num} into {len(chunks)} chunks")
-        
-        return all_chunks
-
-    def _chunk_text(self, text: str, page_number: int) -> List[Dict[str, Any]]:
-        """
-        Split text into chunks for vector storage.
-        
-        Implementation:
-        - Split by paragraphs and sentences, then by size with overlap
-        - Maintain context with overlap
-        - Keep metadata (page number, position, etc.)
-        
-        Args:
-            text: Text to chunk
-            document_id: Document ID (for reference)
-            page_number: Page number where text appears
-            
-        Returns:
-            List of chunk dictionaries with:
-            - content: chunk text
-            - page_number: page where chunk appears
-            - start_pos: start position in page text
-            - related_images: image IDs (added by caller)
-            - related_tables: table IDs (added by caller)
-        """
-        chunks = []
-
-        if not text or not text.strip():
-            return chunks
-
-        # Try to split text by paragraphs, sentences, words in that order if possible
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP,
-            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
-        )
-        splits = text_splitter.split_text(text)
-
-        for split in splits:
-            start_pos = text.find(split)
-            chunks.append({
-                "content": split,
-                "page_number": page_number,
-                "start_pos": start_pos,
-                "related_images": [],
-                "related_tables": [],
-            })
-
-        logger.debug(f"Created {len(chunks)} chunks from page {page_number}")
-        return chunks
-
-    async def _save_text_chunks(
-        self,
-        session: Session,
-        chunks: List[Dict[str, Any]],
-        document_id: int,
-    ) -> None:
-        """
-        Save text chunks to database with embeddings.
-        
-        Implementation:
-        - Generate embeddings using VectorStore
-        - Store in database
-        - Link related images/tables in metadata
-        
-        Args:
-            chunks: List of chunk dictionaries
-            document_id: Document ID
-        """
-        logger.info(f"Saving {len(chunks)} text chunks with embeddings")
-        
-        saved_count = 0
-        for i, chunk in enumerate(chunks):
+        num_chunks = 0
+        for i, chunk in enumerate(chunk_iter):
+            doc_chunk = DocChunk.model_validate(chunk)
+            page_num = doc_chunk.meta.doc_items[0].prov[0].page_no # Get the number the page where this chunk first appears in
+            text = chunker.contextualize(chunk)
             try:
-                # Prepare metadata with related content
-                metadata = {
-                    "related_images": chunk.get("related_images", []),
-                    "related_tables": chunk.get("related_tables", []),
-                    "start_pos": chunk.get("start_pos", 0)
-                }
-
-                # Store chunk with embeddings
                 await self.vector_store.store_chunk(
                     session=session,
-                    content=chunk["content"],
+                    content=text,
                     document_id=document_id,
-                    page_number=chunk["page_number"],
-                    chunk_index=chunk.get("chunk_index", i),
-                    metadata=metadata
+                    page_number=page_num,
+                    chunk_index=i,
+                    metadata={
+                        "related_images": image_ids_by_page.get(page_num, []),
+                        "related_tables": table_ids_by_page.get(page_num, []),
+                        "start_pos": 0, # TODO: Is this applicable for HybridChunker?  
+                    },
                 )
-
-                saved_count += 1
-
-                if (i + 1) % 10 == 0:
-                    logger.debug(f"Saved {i + 1}/{len(chunks)} chunks")
-
+                num_chunks += 1
             except Exception as e:
-                logger.error(f"Failed to save chunk {i}: {e}")
-                # Continue processing other chunks
-                continue
+                logger.error(f"Failed to save chunk with index {i}, page {page_num}: {e}")
+                # Continue processing chunks
 
-        logger.info(f"Successfully saved {saved_count}/{len(chunks)} chunks")
+        logger.info(f"Saved {num_chunks} chunks to Vector Store")
+
+        return num_chunks
 
     def _generate_unique_filepath(
         self,
-        document_type: Literal["table", "image"],
+        media_type: Literal["table", "image"],
         document_id: int,
         page_number: int,
     ) -> str:
-        """Generate a unique filepath from document ID, type, and page number."""
+        """Generate a unique filepath from document ID, media type, and page number."""
         timestamp = datetime.now(timezone.utc).timestamp()
-        filename = f"doc_{document_id}_{document_type}_{page_number}_{int(timestamp)}.png"
-        return os.path.join(settings.UPLOAD_DIR, f"{document_type}s", filename)
+        filename = f"doc_{document_id}_{media_type}_{page_number}_{int(timestamp)}.png"
+        return os.path.join(settings.UPLOAD_DIR, f"{media_type}s", filename)
 
     def _get_document_by_id(self, session: Session, document_id: int) -> Document:
         """Fetch document record from the database."""

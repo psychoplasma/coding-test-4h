@@ -3,6 +3,8 @@ import os
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
+from app.models.document import Document
+
 
 class ChatRequest(BaseModel):
     """Request model for sending a chat message"""
@@ -74,7 +76,7 @@ class DocumentResponse(BaseModel):
     tables: List[dict] = Field(..., description="List of extracted tables from the document")
 
     @staticmethod
-    def from_model(document) -> "DocumentResponse":
+    def from_model(document: Document) -> "DocumentResponse":
         return DocumentResponse(
             id=document.id,
             filename=document.filename,

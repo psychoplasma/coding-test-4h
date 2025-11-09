@@ -1,16 +1,17 @@
 """
 Main FastAPI application entry point
 """
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from backend.app.api import documents_controller
+
+from app.api import chat_controller, documents_controller
 from app.core.config import settings
 from app.db.session import engine
 from app.models import document, conversation
-import os
 
-from backend.app.api import chat_controller
 
 # Create database tables
 document.Base.metadata.create_all(bind=engine)
@@ -25,7 +26,10 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

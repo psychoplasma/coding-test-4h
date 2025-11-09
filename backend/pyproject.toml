@@ -3,7 +3,7 @@ name = "backend"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.17.1",
     "fastapi>=0.121.0",
@@ -18,13 +18,18 @@ dependencies = [
     "python-multipart>=0.0.20",
     "redis>=7.0.1",
     "sqlalchemy>=2.0.44",
-    "testcontainers>=4.13.2",
     "uvicorn[standard]>=0.38.0",
     "langchain>=1.0.4",
     "sentence-transformers>=5.1.2",
     "langchain-openai>=1.0.2",
     "langchain-community>=0.4.1",
     "langchain-google-vertexai>=3.0.2",
+    # Specify exact versions for torch and torchvision which are dependencies for docling to ensure compatibility with intel chips on macOS
+    # If you are using silicon chips on MacOS, remove these lines to allow package manager to select the appropriate versions
+    "torch==2.2.2",
+    "torchvision==0.17.2",
+    "numpy<2.0.0",
+    "docling-core[chunking]>=2.50.1",
 ]
 
 [dependency-groups]

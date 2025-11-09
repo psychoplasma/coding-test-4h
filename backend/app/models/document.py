@@ -1,7 +1,7 @@
 """
 Document-related database models
 """
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Text, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.session import Base
@@ -16,6 +16,7 @@ class Document(Base):
     file_path = Column(String, nullable=False)
     upload_date = Column(DateTime, default=func.now())
     processing_status = Column(String, default="pending")  # pending, processing, completed, error
+    processing_time = Column(Float, default=0.0)
     error_message = Column(Text, nullable=True)
     total_pages = Column(Integer, default=0)
     text_chunks_count = Column(Integer, default=0)
@@ -23,6 +24,7 @@ class Document(Base):
     tables_count = Column(Integer, default=0)
     
     # Relationships
+    conversations = relationship("Conversation", secondary="conversation_documents", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
     images = relationship("DocumentImage", back_populates="document", cascade="all, delete-orphan")
     tables = relationship("DocumentTable", back_populates="document", cascade="all, delete-orphan")
@@ -34,7 +36,7 @@ class DocumentChunk(Base):
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(1536))  # OpenAI embedding dimension
+    embedding = Column(Vector(384))  # See for notes in. app.core.settings
     page_number = Column(Integer)
     chunk_index = Column(Integer)
     chunk_metadata = Column(JSON)  # {related_images: [...], related_tables: [...], ...}

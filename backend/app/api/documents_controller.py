@@ -68,7 +68,7 @@ async def upload_document(
     return UploadDocumentResponse(
         id=doc.id,
         filename=doc.filename,
-        status=doc.processing_status,
+        status=doc.status,
         message="Document uploaded successfully. Processing will begin shortly."
     )
 

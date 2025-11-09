@@ -221,8 +221,8 @@ def sample_conversation(db_session: Session, sample_document):
 
     conversation = Conversation(
         title="Test Conversation",
-        document_id=sample_document.id
     )
+    conversation.documents.append(sample_document)
     db_session.add(conversation)
     db_session.commit()
     db_session.refresh(conversation)

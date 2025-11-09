@@ -11,7 +11,7 @@ from sqlalchemy import select, func
 from app.db.session import scoped_session
 from app.models.document import Document
 from app.services.document_processor import DocumentProcessor
-from backend.app.api.dto import (
+from app.api.dto import (
     DocumentResponse,
     PaginatedDocumentResponse,
 )
@@ -26,26 +26,12 @@ class DocumentService:
     def __init__(self):
         pass
 
-    async def process_document_task(self, document_id: int, file_path: str):
+    async def process_document(self, document_id: int, file_path: str) -> None:
         """Background task to process the uploaded document"""
         try:
             with scoped_session() as session:
-                # Get document
-                document = self._get(session, document_id)
-
-                # Process file and extract content
                 processor = DocumentProcessor()
-                result = await processor.process_document(file_path, document_id)
-
-                # Update document
-                document.filename = os.path.basename(file_path)
-                document.file_path = file_path
-                document.processing_status = "completed"
-                document.text_chunks_count = result["text_chunks"]
-                document.images_count = result["images"]
-                document.tables_count = result["tables"]
-                document.processing_time = result["processing_time"]
-                session.commit()
+                await processor.process_document(session, file_path, document_id)
         except Exception as e:
             logger.error(f"Error processing document ID {document_id}: {e}")
             with scoped_session() as session:

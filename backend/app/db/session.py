@@ -2,7 +2,7 @@
 Database session management
 """
 import contextlib
-from typing import Generator
+from typing import Any, Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -29,7 +29,7 @@ def get_db():
         db.close()
 
 @contextlib.contextmanager
-def scoped_session() -> Generator[Session]:
+def scoped_session() -> Generator[Session, Any, None]:
     """Provide a session scope around a series of operations.
 
     Usage:

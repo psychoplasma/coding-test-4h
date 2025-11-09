@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_google_vertexai import VertexAIEmbeddings
 
 from app.core.config import settings
 from app.db.session import scoped_session
@@ -23,6 +22,8 @@ from app.models.document import DocumentChunk, DocumentImage, DocumentTable
 
 
 logger = logging.getLogger(__name__)
+
+HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 class VectorStore:
@@ -36,8 +37,10 @@ class VectorStore:
     
     def __init__(self):
         self.embeddings_model = None
-        self._initialize_embeddings_model()
+        self.tokenizer = None
         self._ensure_extension()
+        self._initialize_embeddings_model()
+        self._initialize_tokenizer()
     
     def _initialize_embeddings_model(self):
         """
@@ -45,50 +48,67 @@ class VectorStore:
         
         Supports:
         - OpenAI embeddings via OpenAIEmbeddings (if OPENAI_API_KEY is provided)
-        - Gemini embeddings via VertexAIEmbeddings (if GEMINI_API_KEY is provided)
         - HuggingFace embeddings as local fallback
         """
         if settings.OPENAI_API_KEY:
-            try:
-                self.embeddings_model = OpenAIEmbeddings(
-                    model=settings.OPENAI_EMBEDDING_MODEL,
-                    api_key=settings.OPENAI_API_KEY,
-                    dimensions=settings.EMBEDDING_DIMENSION,
-                )
-                logger.info(f"Using OpenAI embeddings (model: {settings.OPENAI_EMBEDDING_MODEL})")
-            except Exception as e:
-                logger.warning(f"Failed to initialize OpenAI embeddings: {e}. Falling back to HuggingFace embeddings")
-                self._init_sentence_transformers()
-        elif settings.USE_GEMINI:
-            try:
-                # Dimension is 768 by default, if needed, can be adjusted when calling embed(dimension=),
-                # instead of embed_query which does not pass dimension parameter down to embed() method.
-                # Just skipping dimension setting for the sake of simplicity
-                self.embeddings_model = VertexAIEmbeddings(
-                    model=settings.GEMINI_EMBEDDING_MODEL,
-                    api_key=settings.GEMINI_API_KEY,
-                )
-                logger.info(f"Using Gemini embeddings (model: {settings.GEMINI_EMBEDDING_MODEL})")
-            except Exception as e:
-                logger.warning(f"Failed to initialize Gemini embeddings: {e}. Falling back to HuggingFace embeddings")
-                self._init_sentence_transformers()
+            self._initialize_openai_embeddings_model()
         else:
-            self._init_sentence_transformers()
+            self._initialize_hf_embeddings_model()
+
+    def _initialize_openai_embeddings_model(self):
+        """
+        Initialize OpenAI embeddings model.
+        """
+        self.embeddings_model = OpenAIEmbeddings(
+            model=settings.OPENAI_EMBEDDING_MODEL,
+            api_key=settings.OPENAI_API_KEY,
+            dimensions=settings.EMBEDDING_DIMENSION,
+        )
+        logger.info(f"Using OpenAI embeddings (model: {settings.OPENAI_EMBEDDING_MODEL})")
     
-    def _init_sentence_transformers(self):
+    def _initialize_hf_embeddings_model(self):
         """
         Initialize HuggingFace embeddings (sentence-transformers) as fallback.
 
         Uses the all-MiniLM-L6-v2 model with 384 dimensions for local embeddings.
         """
-        try:
-            self.embeddings_model = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-            )
-            logger.info("Using HuggingFace embeddings (model: all-MiniLM-L6-v2)")
-        except Exception as e:
-            logger.error(f"Failed to initialize HuggingFace embeddings: {e}")
-            raise RuntimeError("Could not initialize any embedding model")
+        self.embeddings_model = HuggingFaceEmbeddings(
+            model_name=HF_EMBEDDING_MODEL,
+        )
+        logger.info(f"Using HuggingFace embeddings (model: {HF_EMBEDDING_MODEL})")
+    
+    def _initialize_tokenizer(self):
+        """
+        Initialize tokenizer for chunking based on embedding model.
+        For correct chunking(docling's HybridChunker), we need to match the tokenizer to the embedding model.
+        """
+        if settings.OPENAI_API_KEY:
+            self._initialize_openai_tokenizer()
+        else:
+            self._initialize_huggingface_tokenizer()
+
+    def _initialize_openai_tokenizer(self) -> None:
+        """
+        Initialize OpenAI tokenizer for chunking.
+        """
+        import tiktoken
+        from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
+
+        self.tokenizer = OpenAITokenizer(
+            tokenizer=tiktoken.encoding_for_model(settings.OPENAI_EMBEDDING_MODEL),
+            max_tokens=128 * 1024,  # context window length required for OpenAI tokenizers
+        )
+
+    def _initialize_huggingface_tokenizer(self) -> None:
+        """
+        Initialize HuggingFace tokenizer for chunking.
+        """
+        from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+        from transformers import AutoTokenizer
+
+        self.tokenizer = HuggingFaceTokenizer(
+            tokenizer=AutoTokenizer.from_pretrained(HF_EMBEDDING_MODEL),
+        )
 
     def _ensure_extension(self):
         """
@@ -98,7 +118,6 @@ class VectorStore:
         """
         with scoped_session() as session:
             session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            session.commit()
             logger.info("pgvector extension enabled")
     
     async def generate_embedding(self, text: str) -> np.ndarray:
@@ -225,19 +244,19 @@ class VectorStore:
                 dc.content,
                 dc.page_number,
                 dc.chunk_index,
-                dc.metadata,
+                dc.chunk_metadata,
                 dc.document_id,
-                1 - (dc.embedding <=> :query_embedding::vector) as similarity_score
+                1 - (dc.embedding <=> CAST(:query_embedding AS vector)) as similarity_score
             FROM document_chunks dc
         """
         
         # Add document filter if specified
         if document_ids is not None and len(document_ids) > 0:
-            sql_query += " WHERE dc.document_id IN :document_ids"
+            sql_query += " WHERE dc.document_id = ANY(:document_ids)"
         
         # Order by similarity and limit
         sql_query += """
-            ORDER BY dc.embedding <=> :query_embedding::vector
+            ORDER BY dc.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :k
         """
         
@@ -259,7 +278,7 @@ class VectorStore:
                 "content": row[1],
                 "page_number": row[2],
                 "chunk_index": row[3],
-                "metadata": row[4] or {},
+                "chunk_metadata": row[4] or {},
                 "document_id": row[5],
                 "score": float(row[6]) if row[6] else 0.0
             })

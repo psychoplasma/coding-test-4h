@@ -9,6 +9,7 @@ Implements:
 5. Support multi-turn conversations
 """
 import logging
+import os
 import time
 from typing import Dict, Any, List, Optional
 
@@ -56,7 +57,7 @@ class ChatEngine:
             if settings.OPENAI_API_KEY:
                 self.llm_client = ChatOpenAI(
                     name=settings.OPENAI_MODEL,
-                    temperature=0.5,
+                    temperature=0.1, # Be factual
                     api_key=settings.OPENAI_API_KEY,
                     max_completion_tokens=500,
                     streaming=False,
@@ -65,7 +66,9 @@ class ChatEngine:
             elif settings.USE_GEMINI:
                 self.llm_client = ChatVertexAI(
                     model_name=settings.GEMINI_MODEL,
-                    temperature=0.5,
+                    project=settings.GOOGLE_CLOUD_PROJECT,
+                    location=settings.GEMINI_MODEL_LOCATION,
+                    temperature=0.1, # Be factual
                     max_output_tokens=500,
                     streaming=False,
                 )
@@ -132,6 +135,8 @@ class ChatEngine:
         # Step 1: Load conversation history
         history = await self._load_conversation_history(session, conversation_id)
 
+        logger.info(f"Loaded conversation history with {len(history)} messages")
+
         # Step 2: Search for relevant context
         context = await self._search_context(
             session,
@@ -140,14 +145,22 @@ class ChatEngine:
             k=settings.TOP_K_RESULTS,
         )
 
+        logger.info(f"Retrieved {len(context)} context chunks from vector store")
+
         # Step 3: Find related images and tables
         media = await self._find_related_media(session, context)
+
+        logger.info(f"Found {len(media.get('images', []))} images and {len(media.get('tables', []))} tables related to context")
 
         # Step 4 & 5: Generate response using LLM
         answer = await self._generate_response(message, context, history, media)
 
+        logger.info(f"Generated response from LLM: {answer[:100]}...")
+
         # Step 6: Format sources for response
         sources = self._format_sources(context, media)
+
+        logger.info(f"Formatted {len(sources)} sources for response")
 
         # Step 7: Save messages to database
         self._save_messages(session, conversation_id, message, answer, sources)
