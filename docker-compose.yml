@@ -36,8 +36,10 @@ services:
     container_name: docling-backend
     ports:
       - "8000:8000"
+    env_file:
+      - ./backend/.env
     environment:
-      - DATABASE_URL=postgresql://docuser:docpass@postgres:5432/docdb
+      - DATABASE_URL=postgresql+psycopg2://docuser:docpass@docling-postgres:5432/docdb
       - REDIS_URL=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
@@ -49,9 +51,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      # redis:
+      #   condition: service_healthy
+    command: uvicorn app.main --host 0.0.0.0 --port 8000
 
   frontend:
     build:

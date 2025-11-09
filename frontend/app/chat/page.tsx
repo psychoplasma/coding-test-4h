@@ -12,6 +12,9 @@ interface Message {
   created_at: string;
 }
 
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+const API_URL = `${BACKEND_URL}/api`;
+
 export default function ChatPage() {
   const searchParams = useSearchParams();
   const documentId = searchParams.get('document');
@@ -47,7 +50,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, tempUserMessage]);
 
     try {
-      const response = await fetch('http://localhost:8000/api/chat', {
+      const response = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -55,7 +58,7 @@ export default function ChatPage() {
         body: JSON.stringify({
           message: userMessage,
           conversation_id: conversationId,
-          document_id: documentId ? parseInt(documentId) : null
+          document_ids: documentId ? [parseInt(documentId)] : []
         }),
       });
 
@@ -136,7 +139,7 @@ export default function ChatPage() {
                                 {source.caption || 'Image'}
                               </p>
                               <img
-                                src={`http://localhost:8000${source.url}`}
+                                src={`${BACKEND_URL}${source.url}`}
                                 alt={source.caption || 'Document image'}
                                 className="max-w-full rounded"
                               />
@@ -149,7 +152,7 @@ export default function ChatPage() {
                                 {source.caption || 'Table'}
                               </p>
                               <img
-                                src={`http://localhost:8000${source.url}`}
+                                src={`${BACKEND_URL}${source.url}`}
                                 alt={source.caption || 'Document table'}
                                 className="max-w-full rounded"
                               />

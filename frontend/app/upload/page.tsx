@@ -3,6 +3,9 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+const API_URL = `${BACKEND_URL}/api`;
+
 export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -38,7 +41,7 @@ export default function UploadPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch('http://localhost:8000/api/documents/upload', {
+      const response = await fetch(`${API_URL}/documents/upload`, {
         method: 'POST',
         body: formData,
       });

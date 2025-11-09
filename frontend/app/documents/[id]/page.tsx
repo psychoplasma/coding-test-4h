@@ -31,6 +31,9 @@ interface DocumentDetail {
   }>;
 }
 
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const API_URL = `${BACKEND_URL}/api`;
+
 export default function DocumentDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -43,7 +46,7 @@ export default function DocumentDetailPage() {
 
   const fetchDocument = async () => {
     try {
-      const response = await fetch(`http://localhost:8000/api/documents/${params.id}`);
+      const response = await fetch(`${API_URL}/documents/${params.id}`);
       const data = await response.json();
       setDocument(data);
     } catch (error) {
@@ -149,7 +152,7 @@ export default function DocumentDetailPage() {
             {document.images.map((image) => (
               <div key={image.id} className="border rounded-lg p-4">
                 <img
-                  src={`http://localhost:8000${image.url}`}
+                  src={`${BACKEND_URL}${image.url}`}
                   alt={image.caption || 'Document image'}
                   className="w-full rounded mb-2"
                 />
@@ -175,7 +178,7 @@ export default function DocumentDetailPage() {
             {document.tables.map((table) => (
               <div key={table.id} className="border rounded-lg p-4">
                 <img
-                  src={`http://localhost:8000${table.url}`}
+                  src={`${BACKEND_URL}${table.url}`}
                   alt={table.caption || 'Document table'}
                   className="w-full rounded mb-2"
                 />

@@ -10,9 +10,13 @@ interface Document {
   status: string;
   total_pages: number;
   text_chunks: number;
-  images: number;
-  tables: number;
+  error_message?: string;
+  images: any[];
+  tables: any[];
 }
+
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+const API_URL = `${BACKEND_URL}/api`;
 
 export default function Home() {
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -24,9 +28,9 @@ export default function Home() {
 
   const fetchDocuments = async () => {
     try {
-      const response = await fetch("http://localhost:8000/api/documents");
+      const response = await fetch(`${API_URL}/documents?limit=100`);
       const data = await response.json();
-      setDocuments(data.documents || []);
+      setDocuments(data.items || []);
     } catch (error) {
       console.error("Error fetching documents:", error);
     } finally {
@@ -38,7 +42,7 @@ export default function Home() {
     if (!confirm("Are you sure you want to delete this document?")) return;
     
     try {
-      await fetch(`http://localhost:8000/api/documents/${id}`, {
+      await fetch(`${API_URL}/documents/${id}`, {
         method: "DELETE",
       });
       fetchDocuments();
@@ -100,7 +104,7 @@ export default function Home() {
                       <div className="mt-2 flex">
                         <div className="flex items-center text-sm text-gray-500">
                           <p>
-                            {doc.total_pages} pages • {doc.text_chunks} chunks • {doc.images} images • {doc.tables} tables
+                            {doc.total_pages} pages • {doc.text_chunks} chunks • {doc.images.length} images • {doc.tables.length} tables
                           </p>
                         </div>
                       </div>
