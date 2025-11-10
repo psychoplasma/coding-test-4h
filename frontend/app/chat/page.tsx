@@ -17,7 +17,12 @@ const API_URL = `${BACKEND_URL}/api`;
 
 function ChatContent() {
   const searchParams = useSearchParams();
-  const documentId = searchParams.get('document');
+  const documentsParam = searchParams.get('documents');
+  
+  // Parse document IDs from comma-separated string
+  const documentIds = documentsParam 
+    ? documentsParam.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id))
+    : [];
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -58,7 +63,7 @@ function ChatContent() {
         body: JSON.stringify({
           message: userMessage,
           conversation_id: conversationId,
-          document_ids: documentId ? [parseInt(documentId)] : []
+          document_ids: documentIds
         }),
       });
 
@@ -101,8 +106,20 @@ function ChatContent() {
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-0 h-[calc(100vh-12rem)]">
       <h1 className="text-3xl font-bold text-gray-900 mb-6">
-        Chat with Document
-        {documentId && <span className="text-sm text-gray-500 ml-2">(Document #{documentId})</span>}
+        Chat with Document{documentIds.length > 1 ? 's' : ''}
+        {documentIds.length > 0 && (
+          <span className="text-sm text-gray-500 ml-2">
+            (
+            {documentIds.slice(0, 2).map((id, idx) => (
+              <span key={idx}>
+                {idx > 0 && ', '}
+                Document#{id}
+              </span>
+            ))}
+            {documentIds.length > 2 && ` and ${documentIds.length - 2} more`}
+            )
+          </span>
+        )}
       </h1>
 
       <div className="bg-white shadow rounded-lg flex flex-col h-full">
