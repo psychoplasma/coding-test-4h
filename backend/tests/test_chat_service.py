@@ -226,7 +226,6 @@ class TestListConversations:
             mock_scoped_session.return_value.__enter__.return_value = db_session
             
             # Mock the scalar count and execute methods
-            from sqlalchemy import func, select
             db_session.scalar.return_value = 0
             db_session.execute.return_value.scalars.return_value.all.return_value = []
             

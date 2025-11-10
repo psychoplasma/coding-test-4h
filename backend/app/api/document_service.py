@@ -90,19 +90,33 @@ class DocumentService:
             document = self._get(session, document_id)
 
             # Delete physical files
-            if os.path.exists(document.file_path):
+            # If document file doesn't exist, skip deletion to maintain data integrity
+            if not os.path.exists(document.file_path):
+                logger.warning(f"Document file not found: {document.file_path}. Skipping deletion to maintain data integrity.")
+                return
+
+            try:
                 os.remove(document.file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete document file {document.file_path}: {e}")
 
             for img in document.images:
-                if os.path.exists(img.file_path):
-                    os.remove(img.file_path)
+                try:
+                    if os.path.exists(img.file_path):
+                        os.remove(img.file_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete image file {img.file_path}: {e}")
 
             for tbl in document.tables:
-                if os.path.exists(tbl.image_path):
-                    os.remove(tbl.image_path)
+                try:
+                    if os.path.exists(tbl.image_path):
+                        os.remove(tbl.image_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete table file {tbl.image_path}: {e}")
 
             # Delete database record (cascade will handle related records)
             session.delete(document)
+            session.flush()  # Ensure deletion is persisted
 
     def _get(self, session: Session, document_id: int) -> Document:
         document = session.get(Document, document_id)

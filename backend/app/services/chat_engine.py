@@ -11,7 +11,7 @@ Implements:
 import logging
 import os
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 from sqlalchemy import asc, select
@@ -137,26 +137,48 @@ class ChatEngine:
 
         logger.info(f"Loaded conversation history with {len(history)} messages")
 
+        search_context = []
         # Step 2: Search for relevant context
-        context = await self._search_context(
-            session,
-            message,
-            document_ids,
-            k=settings.TOP_K_RESULTS,
-        )
+        # If document_ids is None, search across all documents (pass None to vector store)
+        if document_ids is None:
+            context = await self._search_context(
+                session,
+                message,
+                document_ids=None,
+                k=settings.TOP_K_RESULTS,
+            )
+            logger.info(f"Retrieved {len(context)} context chunks from all documents from vector store")
 
-        logger.info(f"Retrieved {len(context)} context chunks from vector store")
+            # Step 3: Find related images and tables
+            media = await self._find_related_media(session, context)
 
-        # Step 3: Find related images and tables
-        media = await self._find_related_media(session, context)
+            logger.info(f"Found {len(media.get('images', []))} images and {len(media.get('tables', []))} tables related to context")
 
-        logger.info(f"Found {len(media.get('images', []))} images and {len(media.get('tables', []))} tables related to context")
+            search_context.append((0, context, media))  # Use 0 as doc_id for "all documents"
+        else:
+            # Search for all specified documents in a single call
+            context = await self._search_context(
+                session,
+                message,
+                document_ids=document_ids,
+                k=settings.TOP_K_RESULTS,
+            )
+            logger.info(f"Retrieved {len(context)} context chunks for documents {document_ids} from vector store")
+
+            # Step 3: Find related images and tables
+            media = await self._find_related_media(session, context)
+
+            logger.info(f"Found {len(media.get('images', []))} images and {len(media.get('tables', []))} tables related to context")
+
+            # Group results by document ID if needed
+            # For now, keep all results together
+            search_context.append((tuple(document_ids) if len(document_ids) > 1 else document_ids[0], context, media))
 
         # Step 4 & 5: Generate response using LLM
-        answer = await self._generate_response(message, context, history, media)
+        answer = await self._generate_response(message, search_context, history)
 
         # Step 6: Format sources for response
-        sources = self._format_sources(context, media)
+        sources = self._format_sources(search_context)
 
         # Step 7: Save messages to database
         self._save_messages(session, conversation_id, message, answer, sources)
@@ -324,9 +346,8 @@ class ChatEngine:
     async def _generate_response(
         self,
         message: str,
-        context: List[Dict[str, Any]],
+        context: Tuple[int, List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]],
         history: List[Dict[str, str]],
-        media: Dict[str, List[Dict[str, Any]]]
     ) -> str:
         """
         Generate response using LLM.
@@ -341,15 +362,14 @@ class ChatEngine:
         
         Args:
             message: Current user message
-            context: Retrieved context chunks
+            context: Retrieved context chunks and media per document
             history: Conversation history
-            media: Related images and tables
             
         Returns:
             Generated response text
         """
         try:
-            messages = self._aggregate_messages(message, context, history, media)
+            messages = self._aggregate_messages(message, context, history)
             response = self.llm_client.invoke(messages)
             return response.content if response else "I'm sorry, I couldn't generate a response."
         except Exception as e:
@@ -359,39 +379,47 @@ class ChatEngine:
     def _aggregate_messages(
         self,
         message: str,
-        context: List[Dict[str, Any]],
+        context: Any,  # Can be single tuple (doc_id, context_list, media_dict) or list of tuples
         history: List[Dict[str, str]],
-        media: Dict[str, List[Dict[str, Any]]]
     ) -> List[BaseMessage]:
         """Aggregate messages for LLM input."""
         # Build system prompt with multimodal instructions
         system_prompt = self._build_system_prompt()
-
-        # Build context string from retrieved chunks
-        context_str = self._build_context_string(context)
-        # Build context prompt
-        context_prompt = self._build_context_prompt(context_str, media)
-
-        # Build user prompt with history and current message
-        user_prompt = self._build_user_prompt(message, context_str, media)
-
         # Convert history to LangChain message format
         messages = [SystemMessage(content=system_prompt)]
 
+        # Add conversation history
         for hist_msg in history:
             if hist_msg["role"] == "user":
                 messages.append(HumanMessage(content=hist_msg["content"]))
             elif hist_msg["role"] == "assistant":
                 messages.append(AIMessage(content=hist_msg["content"]))
 
-        # Add context prompt
-        messages.append(SystemMessage(content=context_prompt))
+        # Normalize context to list of tuples
+        context_list = []
+        if isinstance(context, tuple) and len(context) == 3 and isinstance(context[0], int):
+            # Single tuple format: (doc_id, context_chunks, media)
+            context_list = [context]
+        elif isinstance(context, list):
+            # List of tuples format
+            context_list = context
+        
+        for doc_id, ctx, media in context_list:
+            # Build context string from retrieved chunks
+            context_str = self._build_context_string(ctx)
+            # Build context prompt
+            context_prompt = self._build_context_prompt(doc_id, context_str, media)
+            # Add context prompt per document
+            messages.append(SystemMessage(content=context_prompt))
+
+        # Build user prompt with history and current message
+        user_prompt = self._build_user_prompt(message)
         # Add current user message
         messages.append(HumanMessage(content=user_prompt))
 
         return messages
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, media: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> str:
         """
         Build system prompt for multimodal responses.
         
@@ -403,28 +431,30 @@ class ChatEngine:
         prompt = """You are a helpful assistant answering questions about documents.
 
 Instructions:
-1. Answer questions based on the provided context from the document
+1. Answer questions based on the provided context from the document or documents
 2. Be accurate and cite specific information from the context
 3. If images or tables are available, reference them in your answer
 4. Format your response clearly with sections if needed
 5. If you don't know the answer based on the context, say so clearly
-6. Keep responses concise but informative"""
+6. Keep responses concise but informative
+7. If multiple documents are provided, specify which document you are referencing when citing sources and split your answer accordingly
+"""
 
         return prompt
 
-    def _build_context_prompt(self, context: str, media: Dict[str, List[Dict[str, Any]]]) -> str:
+    def _build_context_prompt(self, document_id: int, context: str, media: Dict[str, List[Dict[str, Any]]]) -> str:
         """
         Build context prompt for the specific question.
         """
-        prompt = """Here is the context from the document you can use to answer the user's question accurately."""
+        prompt = f"""Here is the context from the document with ID: {document_id} that you can use to answer the user's question accurately."""
 
-        prompt += f"\n\n## Document Context:\n{context}"
+        prompt += f"\n\n## Document#{document_id} Context:\n{context}"
 
         if media.get("images"):
-            prompt += f"\n\n## Available Images\n\n{len(media['images'])} image(s) are available to reference.\n\n{media['images']}"
+            prompt += f"\n\n### Available Images\n\n{len(media['images'])} image(s) are available to reference.\n\n{media['images']}"
 
         if media.get("tables"):
-            prompt += f"\n\n## Available Tables\n\n{len(media['tables'])} table(s) are available to reference.\n\n{media['tables']}"
+            prompt += f"\n\n### Available Tables\n\n{len(media['tables'])} table(s) are available to reference.\n\n{media['tables']}"
 
         return prompt
     
@@ -433,37 +463,40 @@ Instructions:
         if not context:
             return "No relevant context found."
         
-        context_parts = ["## Document Context:\n"]
+        context_parts = []
         for i, chunk in enumerate(context[:3], 1):  # Use top 3 chunks
             page = chunk.get("page_number", "unknown")
             score = chunk.get("score", 0.0)
             content = chunk.get("content", "")
             context_parts.append(f"[Chunk {i} - Page {page} - Score: {score:.2f}]\n{content}\n")
-        
+
         return "\n".join(context_parts)
     
     def _build_user_prompt(
         self,
         message: str,
-        context: str,
-        media: Dict[str, List[Dict[str, Any]]]
+        context: str = "",
+        media: Optional[Dict[str, List[Dict[str, Any]]]] = None
     ) -> str:
         """Build user prompt with context and media information."""
         prompt = f"## User Question:\n{message}"
         
-        # if media.get("images"):
-        #     prompt += f"\n\n## Available Images:\n"
-        #     for img in media["images"]:
-        #         caption = img.get("caption", "No caption")
-        #         page = img.get("page_number", "unknown")
-        #         prompt += f"- Image on page {page}: {caption}\n"
+        if context:
+            prompt += f"\n\n## Context:\n{context}"
         
-        # if media.get("tables"):
-        #     prompt += f"\n## Available Tables:\n"
-        #     for tbl in media["tables"]:
-        #         caption = tbl.get("caption", "No caption")
-        #         page = tbl.get("page_number", "unknown")
-        #         prompt += f"- Table on page {page}: {caption}\n"
+        if media:
+            if media.get("images"):
+                prompt += f"\n\n### Available Images\n"
+                for img in media['images']:
+                    caption = img.get("caption", "Image")
+                    page = img.get("page_number", "unknown")
+                    prompt += f"- {caption} (page {page})\n"
+            if media.get("tables"):
+                prompt += f"\n### Available Tables\n"
+                for tbl in media['tables']:
+                    caption = tbl.get("caption", "Table")
+                    page = tbl.get("page_number", "unknown")
+                    prompt += f"- {caption} (page {page})\n"
         
         return prompt
     
@@ -505,8 +538,8 @@ Instructions:
 
     def _format_sources(
         self,
-        context: List[Dict[str, Any]],
-        media: Dict[str, List[Dict[str, Any]]]
+        context: List[Dict[str, Any]] = None,
+        media: Dict[str, List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Format sources for response.
@@ -515,7 +548,7 @@ Instructions:
         for the frontend to display.
         
         Args:
-            context: Retrieved context chunks
+            context: Retrieved context chunks (for backward compatibility with tuple format)
             media: Related images and tables
             
         Returns:
@@ -523,32 +556,73 @@ Instructions:
         """
         sources = []
         
-        # Add text sources (top 3)
-        for chunk in context[:3]:
-            sources.append({
-                "type": "text",
-                "content": chunk.get("content", "")[:200],  # Truncate for display
-                "page": chunk.get("page_number"),
-                "score": chunk.get("score", 0.0)
-            })
+        # Handle both old format (list of tuples) and new format (separate context/media)
+        if context is None:
+            context = []
+        if media is None:
+            media = {"images": [], "tables": []}
         
-        # Add image sources
-        for image in media.get("images", []):
-            sources.append({
-                "type": "image",
-                "url": image.get("url"),
-                "caption": image.get("caption"),
-                "page": image.get("page_number")
-            })
-        
-        # Add table sources
-        for table in media.get("tables", []):
-            sources.append({
-                "type": "table",
-                "url": table.get("url"),
-                "caption": table.get("caption"),
-                "page": table.get("page_number"),
-                "data": table.get("data")
-            })
-        
+        # If context is a list of tuples from process_message, flatten it
+        if isinstance(context, list) and context and isinstance(context[0], tuple):
+            for doc_id, ctx, ctx_media in context:
+                # Add text sources (top 3)
+                for chunk in ctx[:3]:
+                    sources.append({
+                        "document_id": doc_id,
+                        "type": "text",
+                        "content": chunk.get("content", "")[:200],  # Truncate for display
+                        "page": chunk.get("page_number"),
+                        "score": chunk.get("score", 0.0)
+                    })
+
+                # Add image sources
+                for image in ctx_media.get("images", []):
+                    sources.append({
+                        "document_id": doc_id,
+                        "type": "image",
+                        "url": image.get("url"),
+                        "caption": image.get("caption"),
+                        "page": image.get("page_number")
+                    })
+
+                # Add table sources
+                for table in ctx_media.get("tables", []):
+                    sources.append({
+                        "document_id": doc_id,
+                        "type": "table",
+                        "url": table.get("url"),
+                        "caption": table.get("caption"),
+                        "page": table.get("page_number"),
+                        "data": table.get("data")
+                    })
+        else:
+            # New format: separate context list and media dict
+            # Add text sources (top 3)
+            for chunk in context[:3]:
+                sources.append({
+                    "type": "text",
+                    "content": chunk.get("content", "")[:200],  # Truncate for display
+                    "page": chunk.get("page_number"),
+                    "score": chunk.get("score", 0.0)
+                })
+
+            # Add image sources
+            for image in media.get("images", []):
+                sources.append({
+                    "type": "image",
+                    "url": image.get("url"),
+                    "caption": image.get("caption"),
+                    "page": image.get("page_number")
+                })
+
+            # Add table sources
+            for table in media.get("tables", []):
+                sources.append({
+                    "type": "table",
+                    "url": table.get("url"),
+                    "caption": table.get("caption"),
+                    "page": table.get("page_number"),
+                    "data": table.get("data")
+                })
+
         return sources

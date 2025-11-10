@@ -246,14 +246,33 @@ class TestDeleteDocument:
         sample_tables,
     ):
         """Test deleting a document successfully."""
-        # Act
-        with patch('app.api.document_service.scoped_session') as mock_scoped_session:
-            mock_scoped_session.return_value.__enter__.return_value = db_session
+        # Arrange - Create the actual files in a temp directory
+        import os
+        import tempfile
+        from pathlib import Path
+        
+        # Create temp directory for test files
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Update file paths to temp directory
+            sample_document.file_path = os.path.join(tmpdir, "test_document.pdf")
+            Path(sample_document.file_path).touch()
+            
+            for img in sample_images:
+                img.file_path = os.path.join(tmpdir, f"img_{img.id}.png")
+                Path(img.file_path).touch()
+            
+            for tbl in sample_tables:
+                tbl.image_path = os.path.join(tmpdir, f"tbl_{tbl.id}.png")
+                Path(tbl.image_path).touch()
+            
+            # Act
+            with patch('app.api.document_service.scoped_session') as mock_scoped_session:
+                mock_scoped_session.return_value.__enter__.return_value = db_session
 
-            await document_service.delete(sample_document.id)
+                await document_service.delete(sample_document.id)
 
-        # Assert
-        assert db_session.get(Document, sample_document.id) is None
+            # Assert
+            assert db_session.get(Document, sample_document.id) is None
 
     @pytest.mark.asyncio
     async def test_delete_document_not_found(

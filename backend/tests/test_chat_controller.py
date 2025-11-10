@@ -154,14 +154,14 @@ class TestListConversations:
                     "id": 1,
                     "title": "Test Conversation 1",
                     "created_at": "2025-01-09T10:00:00",
-                    "document_id": 1,
+                    "document_ids": [1],
                     "messages": []
                 },
                 {
                     "id": 2,
                     "title": "Test Conversation 2",
                     "created_at": "2025-01-09T11:00:00",
-                    "document_id": None,
+                    "document_ids": [],
                     "messages": []
                 }
             ]
@@ -240,7 +240,7 @@ class TestGetConversation:
             "id": 1,
             "title": "Test Conversation",
             "created_at": "2025-01-09T10:00:00",
-            "document_id": 1,
+            "document_ids": [1],
             "messages": [
                 {
                     "id": 1,

@@ -292,6 +292,7 @@ def sample_document(db_session: Session):
 def sample_chunks(db_session: Session, sample_document: Document) -> list:
     """
     Create sample document chunks for testing.
+    Uses 384-dimensional embeddings to match HuggingFace sentence-transformers model.
     """
     chunks = [
         DocumentChunk(
@@ -299,7 +300,7 @@ def sample_chunks(db_session: Session, sample_document: Document) -> list:
             content="This is the first chunk of the document about machine learning.",
             page_number=1,
             chunk_index=0,
-            embedding=[0.1] * 1536,
+            embedding=[0.1] * 384,
             chunk_metadata={"related_images": [1], "related_tables": []}
         ),
         DocumentChunk(
@@ -307,7 +308,7 @@ def sample_chunks(db_session: Session, sample_document: Document) -> list:
             content="This is the second chunk discussing neural networks.",
             page_number=2,
             chunk_index=1,
-            embedding=[0.2] * 1536,
+            embedding=[0.2] * 384,
             chunk_metadata={"related_images": [], "related_tables": [1]}
         ),
         DocumentChunk(
@@ -315,7 +316,7 @@ def sample_chunks(db_session: Session, sample_document: Document) -> list:
             content="This is the third chunk covering deep learning.",
             page_number=3,
             chunk_index=2,
-            embedding=[0.3] * 1536,
+            embedding=[0.3] * 384,
             chunk_metadata={"related_images": [], "related_tables": []}
         )
     ]

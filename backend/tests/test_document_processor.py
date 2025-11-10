@@ -90,12 +90,14 @@ class TestDocumentProcessorInitialization:
         """Test that __init__ creates necessary upload directories."""
         from app.services.document_processor import DocumentProcessor
         
-        DocumentProcessor()
-        
-        # Verify upload directories exist
-        assert Path(settings.UPLOAD_DIR).exists()
-        assert Path(os.path.join(settings.UPLOAD_DIR, "images")).exists()
-        assert Path(os.path.join(settings.UPLOAD_DIR, "tables")).exists()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', Path(tmpdir)):
+                DocumentProcessor()
+                
+                # Verify upload directories exist
+                assert Path(tmpdir).exists()
+                assert Path(os.path.join(tmpdir, "images")).exists()
+                assert Path(os.path.join(tmpdir, "tables")).exists()
     
     @patch("app.services.document_processor.VectorStore")
     def test_init_initializes_vector_store(self, mock_vs):
@@ -163,27 +165,29 @@ class TestImageExtraction:
         """Test successful image saving."""
         from app.services.document_processor import DocumentProcessor
         
-        processor = DocumentProcessor()
-        
-        doc_image = await processor._save_image(
-            session=db_session,
-            image=sample_image,
-            document_id=test_document.id,
-            page_number=1,
-            metadata={"caption": "Test Image", "source": "test"}
-        )
-        
-        # Verify image record was created
-        assert doc_image.id is not None
-        assert doc_image.document_id == test_document.id
-        assert doc_image.page_number == 1
-        assert doc_image.caption == "Test Image"
-        assert doc_image.width == 100
-        assert doc_image.height == 100
-        
-        # Verify image file was saved
-        assert os.path.exists(doc_image.file_path)
-        assert doc_image.file_path.endswith(".png")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', tmpdir):
+                processor = DocumentProcessor()
+                
+                doc_image = await processor._save_image(
+                    session=db_session,
+                    image=sample_image,
+                    document_id=test_document.id,
+                    page_number=1,
+                    metadata={"caption": "Test Image", "source": "test"}
+                )
+                
+                # Verify image record was created
+                assert doc_image.id is not None
+                assert doc_image.document_id == test_document.id
+                assert doc_image.page_number == 1
+                assert doc_image.caption == "Test Image"
+                assert doc_image.width == 100
+                assert doc_image.height == 100
+                
+                # Verify image file was saved
+                assert os.path.exists(doc_image.file_path)
+                assert doc_image.file_path.endswith(".png")
     
     @patch("app.services.document_processor.VectorStore")
     @pytest.mark.asyncio
@@ -259,34 +263,44 @@ class TestTableExtraction:
         """Test successful table saving."""
         from docling_core.types.doc import TableItem
         from app.services.document_processor import DocumentProcessor
+        import json
         
-        mock_table = MagicMock()
-        mock_table.data = MagicMock()
-        mock_table.data.num_rows = 3
-        mock_table.data.num_cols = 4
-        mock_table.data.model_dump.return_value = {"headers": ["Col1", "Col2"]}
-        
-        processor = DocumentProcessor()
-        
-        doc_table = processor._save_table(
-            session=db_session,
-            table=mock_table,
-            table_image=sample_image,
-            document_id=test_document.id,
-            page_number=2,
-            metadata={"caption": "Test Table", "source": "test"}
-        )
-        
-        # Verify table record was created
-        assert doc_table.id is not None
-        assert doc_table.document_id == test_document.id
-        assert doc_table.page_number == 2
-        assert doc_table.rows == 3
-        assert doc_table.columns == 4
-        assert doc_table.caption == "Test Table"
-        
-        # Verify image file was saved
-        assert os.path.exists(doc_table.image_path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', tmpdir):
+                mock_table = MagicMock()
+                mock_table.data = MagicMock()
+                mock_table.data.num_rows = 3
+                mock_table.data.num_cols = 4
+                mock_table.data.model_dump.return_value = {"headers": ["Col1", "Col2"]}
+                # Mock export_to_dataframe to return a mock with to_json() that returns a JSON string
+                mock_df = MagicMock()
+                mock_df.to_json.return_value = json.dumps({"headers": ["Col1", "Col2"], "rows": 3})
+                mock_table.export_to_dataframe.return_value = mock_df
+                
+                mock_dl_document = MagicMock()
+                
+                processor = DocumentProcessor()
+                
+                doc_table = processor._save_table(
+                    session=db_session,
+                    dl_document=mock_dl_document,
+                    table=mock_table,
+                    table_image=sample_image,
+                    document_id=test_document.id,
+                    page_number=2,
+                    metadata={"caption": "Test Table", "source": "test"}
+                )
+                
+                # Verify table record was created
+                assert doc_table.id is not None
+                assert doc_table.document_id == test_document.id
+                assert doc_table.page_number == 2
+                assert doc_table.rows == 3
+                assert doc_table.columns == 4
+                assert doc_table.caption == "Test Table"
+                
+                # Verify image file was saved
+                assert os.path.exists(doc_table.image_path)
     
     @patch("app.services.document_processor.VectorStore")
     @pytest.mark.asyncio
@@ -318,6 +332,7 @@ class TestTableExtraction:
     ):
         """Test table extraction with multiple tables."""
         from app.services.document_processor import DocumentProcessor
+        import json
         
         # Create mock tables using isinstance check
         mock_table1 = MagicMock()
@@ -328,6 +343,10 @@ class TestTableExtraction:
         mock_table1.data.num_rows = 2
         mock_table1.data.num_cols = 3
         mock_table1.data.model_dump.return_value = {}
+        # Mock export_to_dataframe for table 1
+        mock_df1 = MagicMock()
+        mock_df1.to_json.return_value = json.dumps({"rows": 2, "cols": 3})
+        mock_table1.export_to_dataframe.return_value = mock_df1
         
         mock_table2 = MagicMock()
         mock_table2.prov = [MagicMock(page_no=3)]
@@ -337,6 +356,10 @@ class TestTableExtraction:
         mock_table2.data.num_rows = 4
         mock_table2.data.num_cols = 5
         mock_table2.data.model_dump.return_value = {}
+        # Mock export_to_dataframe for table 2
+        mock_df2 = MagicMock()
+        mock_df2.to_json.return_value = json.dumps({"rows": 4, "cols": 5})
+        mock_table2.export_to_dataframe.return_value = mock_df2
         
         # Patch isinstance to return True for TableItem
         from docling_core.types.doc import TableItem
@@ -541,20 +564,22 @@ class TestUtilityMethods:
         import time
         from app.services.document_processor import DocumentProcessor
         
-        processor = DocumentProcessor()
-        
-        filepath1 = processor._generate_unique_filepath("image", 1, 1)
-        time.sleep(0.1)  # Small delay to ensure different timestamp
-        filepath2 = processor._generate_unique_filepath("table", 2, 2)
-        
-        # Paths should be unique due to document ID and timestamp
-        assert filepath1 != filepath2
-        assert "image" in filepath1
-        assert "table" in filepath2
-        assert "doc_1" in filepath1
-        assert "doc_2" in filepath2
-        assert filepath1.endswith(".png")
-        assert filepath2.endswith(".png")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', tmpdir):
+                processor = DocumentProcessor()
+                
+                filepath1 = processor._generate_unique_filepath("image", 1, 1)
+                time.sleep(0.1)  # Small delay to ensure different timestamp
+                filepath2 = processor._generate_unique_filepath("table", 2, 2)
+                
+                # Paths should be unique due to document ID and timestamp
+                assert filepath1 != filepath2
+                assert "image" in filepath1
+                assert "table" in filepath2
+                assert "doc_1" in filepath1
+                assert "doc_2" in filepath2
+                assert filepath1.endswith(".png")
+                assert filepath2.endswith(".png")
     
     @patch("app.services.document_processor.VectorStore")
     def test_get_document_by_id_found(self, mock_vs, db_session: Session, test_document: Document):
@@ -583,35 +608,33 @@ class TestUtilityMethods:
         """Test saving image to disk."""
         from app.services.document_processor import DocumentProcessor
         
-        processor = DocumentProcessor()
-        
-        filepath = processor._save_to_disk("image", 1, 1, sample_image)
-        
-        assert os.path.exists(filepath)
-        assert filepath.endswith(".png")
-        
-        # Cleanup
-        os.unlink(filepath)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', tmpdir):
+                processor = DocumentProcessor()
+                
+                filepath = processor._save_to_disk("image", 1, 1, sample_image)
+                
+                assert os.path.exists(filepath)
+                assert filepath.endswith(".png")
     
     @patch("app.services.document_processor.VectorStore")
     def test_save_to_disk_creates_placeholder_on_error(self, mock_vs, sample_image):
         """Test that placeholder is created when save fails."""
         from app.services.document_processor import DocumentProcessor
         
-        processor = DocumentProcessor()
-        
-        with patch.object(sample_image, "save", side_effect=Exception("Disk error")):
-            filepath = processor._save_to_disk("image", 1, 1, sample_image)
-            
-            assert os.path.exists(filepath)
-            assert filepath.endswith(".png")
-            
-            # Verify it's a valid image
-            img = Image.open(filepath)
-            assert img.size == (800, 600)
-            
-            # Cleanup
-            os.unlink(filepath)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', tmpdir):
+                processor = DocumentProcessor()
+                
+                with patch.object(sample_image, "save", side_effect=Exception("Disk error")):
+                    filepath = processor._save_to_disk("image", 1, 1, sample_image)
+                    
+                    assert os.path.exists(filepath)
+                    assert filepath.endswith(".png")
+                    
+                    # Verify it's a valid image
+                    img = Image.open(filepath)
+                    assert img.size == (800, 600)
 
 
 # ============================================================================
@@ -639,70 +662,77 @@ class TestDocumentProcessing:
         from docling_core.types.doc import PictureItem, TableItem
         from contextlib import contextmanager
         
-        # Create mock Docling result
-        mock_picture = MagicMock(spec=PictureItem)
-        mock_picture.prov = [MagicMock(page_no=1)]
-        mock_picture.get_image.return_value = Image.new("RGB", (100, 100), color="blue")
-        mock_picture.caption_text.return_value = "Sample Image"
-        
-        mock_table = MagicMock(spec=TableItem)
-        mock_table.prov = [MagicMock(page_no=2)]
-        mock_table.get_image.return_value = Image.new("RGB", (200, 200), color="green")
-        mock_table.caption_text.return_value = "Sample Table"
-        mock_table.data = MagicMock()
-        mock_table.data.num_rows = 2
-        mock_table.data.num_cols = 3
-        mock_table.data.model_dump.return_value = {"headers": ["A", "B", "C"]}
-        
-        mock_doc = MagicMock()
-        mock_doc.iterate_items.return_value = [
-            (mock_picture, None),
-            (mock_table, None),
-        ]
-        
-        mock_result = MagicMock()
-        mock_result.pages = [MagicMock() for _ in range(3)]
-        mock_result.document = mock_doc
-        
-        # Setup chunks
-        mock_chunk_data = {"content": "Test chunk", "meta": {"doc_items": [{"prov": [{"page_no": 1}]}]}}
-        
-        mock_converter = MagicMock()
-        mock_converter_class.return_value = mock_converter
-        mock_converter.convert.return_value = mock_result
-        
-        mock_vs_instance = AsyncMock()
-        mock_vs_class.return_value = mock_vs_instance
-        mock_vs_instance.tokenizer = MagicMock()
-        
-        mock_chunker = MagicMock()
-        mock_chunker_class.return_value = mock_chunker
-        mock_chunker.chunk.return_value = [mock_chunk_data]
-        mock_chunker.contextualize.return_value = "Contextualized chunk"
-        
-        mock_doc_chunk = MagicMock()
-        mock_doc_chunk.meta.doc_items = [MagicMock()]
-        mock_doc_chunk.meta.doc_items[0].prov = [MagicMock(page_no=1)]
-        
-        with patch("docling_core.transforms.chunker.hierarchical_chunker.DocChunk") as mock_doc_chunk_class:
-            mock_doc_chunk_class.model_validate.return_value = mock_doc_chunk
-            
-            mock_vs_instance.store_chunk = AsyncMock()
-            
-            processor = DocumentProcessor()
-            processor.vector_store = mock_vs_instance
-            
-            # Process document
-            await processor.process_document(db_session, sample_pdf_file, test_document.id)
-            
-            # Verify document status
-            db_session.refresh(test_document)
-            assert test_document.processing_status == "completed"
-            assert test_document.total_pages == 3
-            assert test_document.images_count == 1
-            assert test_document.tables_count == 1
-            assert test_document.text_chunks_count == 1
-            assert test_document.processing_time > 0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', Path(tmpdir)):
+                # Create mock Docling result
+                mock_picture = MagicMock(spec=PictureItem)
+                mock_picture.prov = [MagicMock(page_no=1)]
+                mock_picture.get_image.return_value = Image.new("RGB", (100, 100), color="blue")
+                mock_picture.caption_text.return_value = "Sample Image"
+                
+                mock_table = MagicMock(spec=TableItem)
+                mock_table.prov = [MagicMock(page_no=2)]
+                mock_table.get_image.return_value = Image.new("RGB", (200, 200), color="green")
+                mock_table.caption_text.return_value = "Sample Table"
+                mock_table.data = MagicMock()
+                mock_table.data.num_rows = 2
+                mock_table.data.num_cols = 3
+                mock_table.data.model_dump.return_value = {"headers": ["A", "B", "C"]}
+                # Mock export_to_dataframe
+                import json
+                mock_df = MagicMock()
+                mock_df.to_json.return_value = json.dumps({"headers": ["A", "B", "C"], "rows": 2})
+                mock_table.export_to_dataframe.return_value = mock_df
+                
+                mock_doc = MagicMock()
+                mock_doc.iterate_items.return_value = [
+                    (mock_picture, None),
+                    (mock_table, None),
+                ]
+                
+                mock_result = MagicMock()
+                mock_result.pages = [MagicMock() for _ in range(3)]
+                mock_result.document = mock_doc
+                
+                # Setup chunks
+                mock_chunk_data = {"content": "Test chunk", "meta": {"doc_items": [{"prov": [{"page_no": 1}]}]}}
+                
+                mock_converter = MagicMock()
+                mock_converter_class.return_value = mock_converter
+                mock_converter.convert.return_value = mock_result
+                
+                mock_vs_instance = AsyncMock()
+                mock_vs_class.return_value = mock_vs_instance
+                mock_vs_instance.tokenizer = MagicMock()
+                
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = [mock_chunk_data]
+                mock_chunker.contextualize.return_value = "Contextualized chunk"
+                
+                mock_doc_chunk = MagicMock()
+                mock_doc_chunk.meta.doc_items = [MagicMock()]
+                mock_doc_chunk.meta.doc_items[0].prov = [MagicMock(page_no=1)]
+                
+                with patch("docling_core.transforms.chunker.hierarchical_chunker.DocChunk") as mock_doc_chunk_class:
+                    mock_doc_chunk_class.model_validate.return_value = mock_doc_chunk
+                    
+                    mock_vs_instance.store_chunk = AsyncMock()
+                    
+                    processor = DocumentProcessor()
+                    processor.vector_store = mock_vs_instance
+                    
+                    # Process document
+                    await processor.process_document(db_session, sample_pdf_file, test_document.id)
+                    
+                    # Verify document status
+                    db_session.refresh(test_document)
+                    assert test_document.processing_status == "completed"
+                    assert test_document.total_pages == 3
+                    assert test_document.images_count == 1
+                    assert test_document.tables_count == 1
+                    assert test_document.text_chunks_count == 1
+                    assert test_document.processing_time > 0
     
     @patch("app.services.document_processor.VectorStore")
     @patch("app.services.document_processor.DocumentConverter")
@@ -720,30 +750,32 @@ class TestDocumentProcessing:
         """Test that document status is updated during processing."""
         from app.services.document_processor import DocumentProcessor
         
-        mock_result = MagicMock()
-        mock_result.pages = [MagicMock()]
-        mock_result.document.iterate_items.return_value = []
-        
-        mock_converter = MagicMock()
-        mock_converter_class.return_value = mock_converter
-        mock_converter.convert.return_value = mock_result
-        
-        mock_vs_instance = AsyncMock()
-        mock_vs_class.return_value = mock_vs_instance
-        mock_vs_instance.tokenizer = MagicMock()
-        
-        mock_chunker = MagicMock()
-        mock_chunker_class.return_value = mock_chunker
-        mock_chunker.chunk.return_value = []
-        
-        processor = DocumentProcessor()
-        processor.vector_store = mock_vs_instance
-        
-        await processor.process_document(db_session, sample_pdf_file, test_document.id)
-        
-        # Verify status progression
-        db_session.refresh(test_document)
-        assert test_document.processing_status == "completed"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', Path(tmpdir)):
+                mock_result = MagicMock()
+                mock_result.pages = [MagicMock()]
+                mock_result.document.iterate_items.return_value = []
+                
+                mock_converter = MagicMock()
+                mock_converter_class.return_value = mock_converter
+                mock_converter.convert.return_value = mock_result
+                
+                mock_vs_instance = AsyncMock()
+                mock_vs_class.return_value = mock_vs_instance
+                mock_vs_instance.tokenizer = MagicMock()
+                
+                mock_chunker = MagicMock()
+                mock_chunker_class.return_value = mock_chunker
+                mock_chunker.chunk.return_value = []
+                
+                processor = DocumentProcessor()
+                processor.vector_store = mock_vs_instance
+                
+                await processor.process_document(db_session, sample_pdf_file, test_document.id)
+                
+                # Verify status progression
+                db_session.refresh(test_document)
+                assert test_document.processing_status == "completed"
 
 
 # ============================================================================
@@ -759,81 +791,94 @@ class TestDatabaseInteractions:
         """Test saving and retrieving images from database."""
         from app.services.document_processor import DocumentProcessor
         
-        sample_image = Image.new("RGB", (150, 200), color="yellow")
-        
-        processor = DocumentProcessor()
-        
-        # Save first image
-        doc_image1 = await processor._save_image(
-            session=db_session,
-            image=sample_image,
-            document_id=test_document.id,
-            page_number=1,
-            metadata={"caption": "Image 1"}
-        )
-        
-        # Save second image
-        doc_image2 = await processor._save_image(
-            session=db_session,
-            image=sample_image,
-            document_id=test_document.id,
-            page_number=2,
-            metadata={"caption": "Image 2"}
-        )
-        
-        # Retrieve images
-        images = db_session.query(DocumentImage).filter_by(
-            document_id=test_document.id
-        ).all()
-        
-        assert len(images) == 2
-        assert images[0].caption == "Image 1"
-        assert images[1].caption == "Image 2"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', Path(tmpdir)):
+                sample_image = Image.new("RGB", (150, 200), color="yellow")
+                
+                processor = DocumentProcessor()
+                
+                # Save first image
+                doc_image1 = await processor._save_image(
+                    session=db_session,
+                    image=sample_image,
+                    document_id=test_document.id,
+                    page_number=1,
+                    metadata={"caption": "Image 1"}
+                )
+                
+                # Save second image
+                doc_image2 = await processor._save_image(
+                    session=db_session,
+                    image=sample_image,
+                    document_id=test_document.id,
+                    page_number=2,
+                    metadata={"caption": "Image 2"}
+                )
+                
+                # Retrieve images
+                images = db_session.query(DocumentImage).filter_by(
+                    document_id=test_document.id
+                ).all()
+                
+                assert len(images) == 2
+                assert images[0].caption == "Image 1"
+                assert images[1].caption == "Image 2"
     
     @patch("app.services.document_processor.VectorStore")
     def test_save_and_retrieve_tables(self, mock_vs, db_session: Session, test_document: Document):
         """Test saving and retrieving tables from database."""
         from app.services.document_processor import DocumentProcessor
+        import json
         
-        sample_image = Image.new("RGB", (200, 150), color="cyan")
-        mock_table = MagicMock()
-        mock_table.data = MagicMock()
-        mock_table.data.num_rows = 5
-        mock_table.data.num_cols = 3
-        mock_table.data.model_dump.return_value = {"headers": ["A", "B", "C"]}
-        
-        processor = DocumentProcessor()
-        
-        # Save first table
-        doc_table1 = processor._save_table(
-            session=db_session,
-            table=mock_table,
-            table_image=sample_image,
-            document_id=test_document.id,
-            page_number=1,
-            metadata={"caption": "Table 1"}
-        )
-        
-        # Save second table
-        doc_table2 = processor._save_table(
-            session=db_session,
-            table=mock_table,
-            table_image=sample_image,
-            document_id=test_document.id,
-            page_number=3,
-            metadata={"caption": "Table 2"}
-        )
-        
-        # Retrieve tables
-        tables = db_session.query(DocumentTable).filter_by(
-            document_id=test_document.id
-        ).all()
-        
-        assert len(tables) == 2
-        assert tables[0].caption == "Table 1"
-        assert tables[1].caption == "Table 2"
-        assert tables[0].rows == 5
-        assert tables[0].columns == 3
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch('app.core.config.settings.UPLOAD_DIR', Path(tmpdir)):
+                sample_image = Image.new("RGB", (200, 150), color="cyan")
+                mock_table = MagicMock()
+                mock_table.data = MagicMock()
+                mock_table.data.num_rows = 5
+                mock_table.data.num_cols = 3
+                mock_table.data.model_dump.return_value = {"headers": ["A", "B", "C"]}
+                # Mock export_to_dataframe to return a dataframe with to_json() that returns a JSON string
+                mock_df = MagicMock()
+                mock_df.to_json.return_value = json.dumps({"headers": ["A", "B", "C"], "rows": 5})
+                mock_table.export_to_dataframe.return_value = mock_df
+                
+                mock_dl_document = MagicMock()
+                
+                processor = DocumentProcessor()
+                
+                # Save first table
+                doc_table1 = processor._save_table(
+                    session=db_session,
+                    dl_document=mock_dl_document,
+                    table=mock_table,
+                    table_image=sample_image,
+                    document_id=test_document.id,
+                    page_number=1,
+                    metadata={"caption": "Table 1"}
+                )
+                
+                # Save second table
+                doc_table2 = processor._save_table(
+                    session=db_session,
+                    dl_document=mock_dl_document,
+                    table=mock_table,
+                    table_image=sample_image,
+                    document_id=test_document.id,
+                    page_number=3,
+                    metadata={"caption": "Table 2"}
+                )
+                
+                # Retrieve tables
+                tables = db_session.query(DocumentTable).filter_by(
+                    document_id=test_document.id
+                ).all()
+                
+                assert len(tables) == 2
+                assert tables[0].caption == "Table 1"
+                assert tables[1].caption == "Table 2"
+                assert tables[0].rows == 5
+                assert tables[0].columns == 3
 
 
 # ============================================================================

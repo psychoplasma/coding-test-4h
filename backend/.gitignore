@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+.venv
+
+uploads/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+.coverage
+
+.env
+
+service-account.json

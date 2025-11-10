@@ -265,9 +265,8 @@ class TestGenerateResponse:
         
         response = await chat_engine_with_mocks._generate_response(
             message,
-            context,
+            (1, context, media),
             history,
-            media
         )
         
         # Verify LLM was called
@@ -288,9 +287,8 @@ class TestGenerateResponse:
         
         response = await chat_engine_with_mocks._generate_response(
             "question",
+            (1, [], [{"images": [], "tables": []}]),
             [],
-            [],
-            {"images": [], "tables": []}
         )
         
         # Should return error message instead of raising
@@ -304,9 +302,8 @@ class TestGenerateResponse:
         """Test generate_response includes system prompt."""
         await chat_engine_with_mocks._generate_response(
             "test question",
-            [{"id": 1, "content": "context"}],
+            (1,[{"id": 1, "content": "context"}], {"images": [{"url": "img1"}], "tables": [{"url": "tbl1"}]}),
             [],
-            {"images": [{"url": "img1"}], "tables": [{"url": "tbl1"}]}
         )
         
         # Get the messages passed to LLM
@@ -331,9 +328,8 @@ class TestAggregateMessages:
         """Test aggregate_messages includes system prompt."""
         messages = chat_engine_with_mocks._aggregate_messages(
             "test question",
-            [{"id": 1, "content": "context"}],
+            (1,[{"id": 1, "content": "context"}], {"images": [], "tables": []}),
             [],
-            {"images": [], "tables": []}
         )
         
         assert len(messages) > 0
@@ -351,9 +347,8 @@ class TestAggregateMessages:
         
         messages = chat_engine_with_mocks._aggregate_messages(
             "current question",
-            [{"id": 1, "content": "context"}],
+            (1,[{"id": 1, "content": "context"}], {"images": [], "tables": []}),
             history,
-            {"images": [], "tables": []}
         )
         
         # Should have system + history + current = at least 4 messages
@@ -366,9 +361,8 @@ class TestAggregateMessages:
         """Test aggregate_messages includes current user message."""
         messages = chat_engine_with_mocks._aggregate_messages(
             "current question",
-            [{"id": 1, "content": "context"}],
+            (1,[{"id": 1, "content": "context"}], {"images": [], "tables": []}),
             [],
-            {"images": [], "tables": []}
         )
         
         # Last message should be human (user) message
