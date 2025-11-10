@@ -59,7 +59,7 @@ class ChatEngine:
                     name=settings.OPENAI_MODEL,
                     temperature=0.1, # Be factual
                     api_key=settings.OPENAI_API_KEY,
-                    max_completion_tokens=500,
+                    max_completion_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
                     streaming=False,
                 )
                 logger.info(f"LLM initialized with OpenAI")
@@ -69,7 +69,7 @@ class ChatEngine:
                     project=settings.GOOGLE_CLOUD_PROJECT,
                     location=settings.GEMINI_MODEL_LOCATION,
                     temperature=0.1, # Be factual
-                    max_output_tokens=500,
+                    max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
                     streaming=False,
                 )
                 logger.info(f"LLM initialized with Gemini")
@@ -155,12 +155,8 @@ class ChatEngine:
         # Step 4 & 5: Generate response using LLM
         answer = await self._generate_response(message, context, history, media)
 
-        logger.info(f"Generated response from LLM: {answer[:100]}...")
-
         # Step 6: Format sources for response
         sources = self._format_sources(context, media)
-
-        logger.info(f"Formatted {len(sources)} sources for response")
 
         # Step 7: Save messages to database
         self._save_messages(session, conversation_id, message, answer, sources)
@@ -369,10 +365,12 @@ class ChatEngine:
     ) -> List[BaseMessage]:
         """Aggregate messages for LLM input."""
         # Build system prompt with multimodal instructions
-        system_prompt = self._build_system_prompt(media)
+        system_prompt = self._build_system_prompt()
 
         # Build context string from retrieved chunks
         context_str = self._build_context_string(context)
+        # Build context prompt
+        context_prompt = self._build_context_prompt(context_str, media)
 
         # Build user prompt with history and current message
         user_prompt = self._build_user_prompt(message, context_str, media)
@@ -386,12 +384,14 @@ class ChatEngine:
             elif hist_msg["role"] == "assistant":
                 messages.append(AIMessage(content=hist_msg["content"]))
 
+        # Add context prompt
+        messages.append(SystemMessage(content=context_prompt))
         # Add current user message
         messages.append(HumanMessage(content=user_prompt))
 
         return messages
 
-    def _build_system_prompt(self, media: Dict[str, List[Dict[str, Any]]]) -> str:
+    def _build_system_prompt(self) -> str:
         """
         Build system prompt for multimodal responses.
         
@@ -409,13 +409,23 @@ Instructions:
 4. Format your response clearly with sections if needed
 5. If you don't know the answer based on the context, say so clearly
 6. Keep responses concise but informative"""
-        
+
+        return prompt
+
+    def _build_context_prompt(self, context: str, media: Dict[str, List[Dict[str, Any]]]) -> str:
+        """
+        Build context prompt for the specific question.
+        """
+        prompt = """Here is the context from the document you can use to answer the user's question accurately."""
+
+        prompt += f"\n\n## Document Context:\n{context}"
+
         if media.get("images"):
-            prompt += f"\n7. Available images: {len(media['images'])} image(s) are available to reference"
-        
+            prompt += f"\n\n## Available Images\n\n{len(media['images'])} image(s) are available to reference.\n\n{media['images']}"
+
         if media.get("tables"):
-            prompt += f"\n8. Available tables: {len(media['tables'])} table(s) are available to reference"
-        
+            prompt += f"\n\n## Available Tables\n\n{len(media['tables'])} table(s) are available to reference.\n\n{media['tables']}"
+
         return prompt
     
     def _build_context_string(self, context: List[Dict[str, Any]]) -> str:
@@ -439,21 +449,21 @@ Instructions:
         media: Dict[str, List[Dict[str, Any]]]
     ) -> str:
         """Build user prompt with context and media information."""
-        prompt = f"{context}\n\n## User Question:\n{message}"
+        prompt = f"## User Question:\n{message}"
         
-        if media.get("images"):
-            prompt += f"\n\n## Available Images:\n"
-            for img in media["images"]:
-                caption = img.get("caption", "No caption")
-                page = img.get("page_number", "unknown")
-                prompt += f"- Image on page {page}: {caption}\n"
+        # if media.get("images"):
+        #     prompt += f"\n\n## Available Images:\n"
+        #     for img in media["images"]:
+        #         caption = img.get("caption", "No caption")
+        #         page = img.get("page_number", "unknown")
+        #         prompt += f"- Image on page {page}: {caption}\n"
         
-        if media.get("tables"):
-            prompt += f"\n## Available Tables:\n"
-            for tbl in media["tables"]:
-                caption = tbl.get("caption", "No caption")
-                page = tbl.get("page_number", "unknown")
-                prompt += f"- Table on page {page}: {caption}\n"
+        # if media.get("tables"):
+        #     prompt += f"\n## Available Tables:\n"
+        #     for tbl in media["tables"]:
+        #         caption = tbl.get("caption", "No caption")
+        #         page = tbl.get("page_number", "unknown")
+        #         prompt += f"- Table on page {page}: {caption}\n"
         
         return prompt
     

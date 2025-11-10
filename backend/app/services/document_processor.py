@@ -18,7 +18,7 @@ from docling_core.types.doc import PictureItem, TableItem
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult, DoclingDocument
-from docling.datamodel.pipeline_options import TableFormerMode, PdfPipelineOptions
+from docling.datamodel.pipeline_options import TableFormerMode, PdfPipelineOptions, EasyOcrOptions
 from PIL import Image
 from sqlalchemy.orm import Session
 
@@ -144,10 +144,13 @@ class DocumentProcessor:
         """
         logger.info(f"Parsing PDF: {file_path}")
 
-        pipeline_options = PdfPipelineOptions(do_table_structure=True)
+        pipeline_options = PdfPipelineOptions()
+        # Table extraction settings
+        pipeline_options.do_table_structure = True
         pipeline_options.table_structure_options.do_cell_matching = False
         pipeline_options.do_formula_enrichment = True
         pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+        # Image generation settings
         pipeline_options.images_scale = 2.0
         pipeline_options.generate_page_images = True
         pipeline_options.generate_picture_images = True
@@ -285,6 +288,7 @@ class DocumentProcessor:
 
                 tbl_record = self._save_table(
                     session=session,
+                    dl_document=docling_result.document,
                     table=element,
                     table_image=table_image,
                     document_id=document_id,
@@ -305,6 +309,7 @@ class DocumentProcessor:
     def _save_table(
         self,
         session: Session,
+        dl_document: DoclingDocument,
         table: TableItem,
         table_image: Image.Image,
         document_id: int,
@@ -339,14 +344,14 @@ class DocumentProcessor:
             caption=metadata.get("caption"),
             rows=table.data.num_rows,
             columns=table.data.num_cols,
-            data=table.data.model_dump(), # FIXME: Does this serialize table cells correctly?
+            data=table.export_to_dataframe(dl_document).to_json(),
             metadata=metadata
         )
 
         session.add(doc_table)
         session.flush()
 
-        logger.info(f"Created DocumentTable record {doc_table.id}")
+        logger.debug(f"Created DocumentTable record {doc_table.id}")
         return doc_table
 
     def _save_to_disk(

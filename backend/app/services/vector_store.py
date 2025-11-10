@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.core.config import settings
 from app.db.session import scoped_session
@@ -181,7 +181,7 @@ class VectorStore:
         session.add(chunk)
         session.flush()  # To get ID assigned
 
-        logger.info(f"Stored chunk {chunk_index} for document {document_id}")
+        logger.debug(f"Stored chunk {chunk_index} for document {document_id}")
         return chunk
     
     async def similarity_search(

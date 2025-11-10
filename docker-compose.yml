@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: docpass
       POSTGRES_DB: docdb
     ports:
-      - "5432:5432"
+      - "9432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -40,20 +40,16 @@ services:
       - ./backend/.env
     environment:
       - DATABASE_URL=postgresql+psycopg2://docuser:docpass@docling-postgres:5432/docdb
-      - REDIS_URL=redis://redis:6379/0
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
-      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      # - REDIS_URL=redis://redis:6379/0
       - UPLOAD_DIR=/app/uploads
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/config/service-account.json
     volumes:
-      - ./backend:/app
-      - backend_uploads:/app/uploads
+      - ./backend/uploads:/app/uploads
+      - ./backend/service-account.json:/app/config/service-account.json
     depends_on:
       postgres:
         condition: service_healthy
-      # redis:
-      #   condition: service_healthy
-    command: uvicorn app.main --host 0.0.0.0 --port 8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
   frontend:
     build:
@@ -63,16 +59,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
+      - NEXT_PUBLIC_BACKEND_URL=http://docling-backend:8000
     depends_on:
       - backend
-    command: npm run dev
+    command: npm start
 
 volumes:
   postgres_data:
   redis_data:
-  backend_uploads:

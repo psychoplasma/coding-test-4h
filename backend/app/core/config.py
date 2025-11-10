@@ -1,12 +1,35 @@
 """
 Application configuration
 """
+import logging
 import os
 from typing import Optional
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+logger = logging.getLogger(__name__)
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with color support"""
+    
+    COLORS = {
+        'DEBUG': '\033[36m',      # Cyan
+        'INFO': '\033[32m',       # Green
+        'WARNING': '\033[33m',    # Yellow
+        'ERROR': '\033[31m',      # Red
+        'CRITICAL': '\033[41m',   # Red background
+    }
+    RESET = '\033[0m'
+    
+    def format(self, record):
+        log_color = self.COLORS.get(record.levelname, self.RESET)
+        # Format the message first
+        formatted_message = super().format(record)
+        # Wrap the entire message with color
+        colored_message = f"{log_color}{formatted_message}{self.RESET}"
+        return colored_message
 
 class Settings(BaseSettings):
     model_config=SettingsConfigDict(
@@ -24,6 +47,8 @@ class Settings(BaseSettings):
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    LLM_MAX_OUTPUT_TOKENS: int = 1024
     
     # OpenAI
     OPENAI_API_KEY: Optional[str] = None
@@ -47,6 +72,31 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     TOP_K_RESULTS: int = 5
+
+    LOG_FORMAT: str = "[%(levelname)s] %(asctime)s [%(name)s] %(filename)s:%(lineno)d: %(message)s"
+    LOG_LEVEL: str = "INFO"
+
+    @model_validator(mode="after")
+    def configure_logging(self):
+        formatter = ColoredFormatter(
+            fmt=self.LOG_FORMAT,
+            datefmt="%Y-%m-%d %H:%M:%S,%f"[:-3]
+        )
+        
+        # Configure root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(self.LOG_LEVEL)
+        
+        # Remove existing handlers
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        
+        # Add console handler with formatter
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+
+        return self
 
     @model_validator(mode="after")
     def ensure_gcp_variables(self):

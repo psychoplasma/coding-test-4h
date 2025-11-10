@@ -10,6 +10,8 @@ dependencies = [
     "httpx>=0.28.1",
     "pgvector>=0.4.1",
     "docling>=2.11.0",
+    "docling-core[chunking]>=2.50.1",
+    "easyocr>=1.7.2",
     "pillow>=10.0.0,<12.0.0",
     "psycopg2-binary>=2.9.11",
     "pydantic>=2.12.3",
@@ -22,14 +24,17 @@ dependencies = [
     "langchain>=1.0.4",
     "sentence-transformers>=5.1.2",
     "langchain-openai>=1.0.2",
+    "langchain-huggingface>=1.0.1",
     "langchain-community>=0.4.1",
     "langchain-google-vertexai>=3.0.2",
+    "rapidocr>=3.4.2",
+    "onnxruntime>=1.23.2",
+    # Running on docker is encouraged to avoid compatibility issues,
+    # however, if you are running on an intel chip with MacOS, uncomment the following lines
     # Specify exact versions for torch and torchvision which are dependencies for docling to ensure compatibility with intel chips on macOS
-    # If you are using silicon chips on MacOS, remove these lines to allow package manager to select the appropriate versions
-    "torch==2.2.2",
-    "torchvision==0.17.2",
-    "numpy<2.0.0",
-    "docling-core[chunking]>=2.50.1",
+    # "torch==2.2.2",
+    # "torchvision==0.17.2",
+    # "numpy<2.0.0",
 ]
 
 [dependency-groups]
