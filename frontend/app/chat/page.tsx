@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 
@@ -15,7 +15,7 @@ interface Message {
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 const API_URL = `${BACKEND_URL}/api`;
 
-export default function ChatPage() {
+function ChatContent() {
   const searchParams = useSearchParams();
   const documentId = searchParams.get('document');
   
@@ -218,5 +218,13 @@ export default function ChatPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-screen">Loading...</div>}>
+      <ChatContent />
+    </Suspense>
   );
 }
