@@ -30,9 +30,6 @@ export default function RootLayout({
                   <Link href="/upload" className="flex items-center text-gray-700 hover:text-blue-600">
                     Upload
                   </Link>
-                  <Link href="/chat" className="flex items-center text-gray-700 hover:text-blue-600">
-                    Chat
-                  </Link>
                 </div>
               </div>
             </div>
