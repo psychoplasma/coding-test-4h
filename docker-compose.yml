@@ -45,11 +45,11 @@ services:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/config/service-account.json
     volumes:
       - ./backend/uploads:/app/uploads
-      - ./backend/service-account.json:/app/config/service-account.json
+      - ./backend:/app/config
     depends_on:
       postgres:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
   frontend:
     build:
